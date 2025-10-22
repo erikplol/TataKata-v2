@@ -8,6 +8,7 @@ use Illuminate\Support\Facades\Storage;
 use App\Models\Document;
 use Illuminate\View\View;
 use Illuminate\Support\Collection;
+use Illuminate\Support\Str;
 
 class HistoryController extends Controller
 {
@@ -128,34 +129,43 @@ class HistoryController extends Controller
         ]);
 
         $userId = Auth::id();
-        $zipFileName = 'takatakata_bulk_download_' . time() . '.zip';
-        $tempPath = storage_path('app/public/' . $zipFileName);
+        $zipFileName = 'takatakata_koreksi_massal_' . time() . '.zip';
+        // Buat folder 'temp' untuk file ZIP sementara
+        $zipDir = storage_path('app/public/temp');
+        $zipFilePath = $zipDir . '/' . $zipFileName;
         
+        if (!is_dir($zipDir)) {
+            mkdir($zipDir, 0777, true);
+        }
+
         $zip = new \ZipArchive();
 
-        if ($zip->open($tempPath, \ZipArchive::CREATE | \ZipArchive::OVERWRITE) !== TRUE) {
+        if ($zip->open($zipFilePath, \ZipArchive::CREATE | \ZipArchive::OVERWRITE) !== TRUE) {
             return redirect()->route('history')->with('error', 'Gagal membuat file ZIP.');
         }
 
         $downloadedCount = 0;
         
         foreach ($request->input('selected_items') as $itemKey) {
-            [$itemType, $itemId] = explode('_', $itemKey);
+            $parts = explode('_', $itemKey, 2);
+            if (count($parts) !== 2) continue; // Skip invalid format
+            
+            [$itemType, $itemId] = $parts;
 
-            if ($itemType === 'document') {
+            if ($itemType === 'document' && is_numeric($itemId)) {
                 $document = Document::where('id', $itemId)
                                     ->where('user_id', $userId)
                                     ->where('upload_status', 'Completed')
                                     ->first();
 
-                if ($document) {
-                    $filePath = Storage::disk('public')->path($document->file_location);
-                    $fileName = $document->file_name . '_' . $document->id . '.pdf';
-
-                    if (file_exists($filePath)) {
-                        $zip->addFile($filePath, $fileName);
-                        $downloadedCount++;
-                    }
+                // Ubah dari mengunduh file, menjadi menambahkan teks koreksi
+                if ($document && !empty($document->corrected_text)) {
+                    $safeFileName = Str::slug($document->file_name);
+                    $filenameInZip = "koreksi-{$safeFileName}-{$document->id}.md";
+                    
+                    // Tambahkan konten teks sebagai file .md ke ZIP
+                    $zip->addFromString($filenameInZip, $document->corrected_text);
+                    $downloadedCount++;
                 }
             }
         }
@@ -163,9 +173,14 @@ class HistoryController extends Controller
         $zip->close();
 
         if ($downloadedCount === 0) {
-            return redirect()->route('history')->with('error', 'Tidak ada dokumen yang valid atau selesai untuk diunduh.');
+            // Hapus file ZIP kosong
+            if (file_exists($zipFilePath)) {
+                unlink($zipFilePath);
+            }
+            return redirect()->route('history')->with('error', 'Tidak ada dokumen yang valid atau selesai untuk diunduh. Pastikan semua dokumen telah selesai dikoreksi.');
         }
 
-        return response()->download($tempPath, $zipFileName)->deleteFileAfterSend(true);
+        // Unduh file ZIP dan hapus setelah terkirim
+        return response()->download($zipFilePath, $zipFileName)->deleteFileAfterSend(true);
     }
 }

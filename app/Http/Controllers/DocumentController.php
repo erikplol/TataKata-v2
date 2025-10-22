@@ -10,6 +10,7 @@ use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
 use Smalot\PdfParser\Parser;
+use Illuminate\Support\Str;
 
 class DocumentController extends Controller
 {
@@ -122,15 +123,24 @@ class DocumentController extends Controller
         $document = Document::findOrFail($id);
 
         if ($document->user_id !== Auth::id()) {
-            abort(403, 'Anda tidak memiliki akses ke file ini.');
+            abort(403, 'Anda tidak memiliki akses ke koreksi ini.');
         }
 
-        $path = storage_path('app/public/' . $document->file_location);
-
-        if (!file_exists($path)) {
-            return back()->with('error', 'File tidak ditemukan.');
+        $correctedText = $document->corrected_text;
+        
+        // Cek apakah hasil koreksi tersedia
+        if (empty($correctedText)) {
+            return back()->with('error', 'Hasil koreksi belum tersedia.');
         }
 
-        return response()->download($path, $document->file_name . '.pdf');
+        // Membuat nama file yang aman dan deskriptif
+        $safeFileName = Str::slug($document->file_name);
+        $timestamp = now()->format('Ymd-His');
+        $filename = "koreksi-{$safeFileName}-{$timestamp}.md";
+
+        // Mengirimkan konten sebagai response dengan tipe text/markdown
+        return response($correctedText, 200)
+            ->header('Content-Type', 'text/markdown')
+            ->header('Content-Disposition', "attachment; filename=\"{$filename}\"");
     }
 }
