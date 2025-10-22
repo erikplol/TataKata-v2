@@ -42,34 +42,40 @@ class HistoryController extends Controller
             'item_id' => 'required|integer',
             'item_type' => 'required|in:document',
         ]);
-
         $itemId = $request->input('item_id');
         $itemType = $request->input('item_type');
         $userId = Auth::id();
 
+        // Only documents are supported here (kept for future expansion)
+        if ($itemType !== 'document') {
+            return redirect()->route('history')->with('error', 'Tipe item tidak valid.');
+        }
+
         try {
-            if ($itemType === 'document') {
-                $item = Document::where('id', $itemId)
+            $document = Document::where('id', $itemId)
                                 ->where('user_id', $userId)
                                 ->firstOrFail();
-                
-                if (!empty($item->file_location) && Storage::disk('public')->exists($item->file_location)) {
-                    Storage::disk('public')->delete($item->file_location);
+
+            // Safely attempt to delete the stored file (log but don't fail the whole operation)
+            if (!empty($document->file_location)) {
+                try {
+                    if (Storage::disk('public')->exists($document->file_location)) {
+                        Storage::disk('public')->delete($document->file_location);
+                    }
+                } catch (\Exception $e) {
+                    \Log::warning("Could not delete storage file for Document {$document->id}: " . $e->getMessage());
                 }
-
-                $item->delete();
-                $message = 'Dokumen berhasil dihapus dari riwayat.';
-
-            } else {
-                abort(400, 'Tipe item tidak valid.');
             }
 
+            $document->delete();
+
+            $message = 'Dokumen berhasil dihapus dari riwayat.';
             return redirect()->route('history')->with('success', $message);
 
         } catch (\Illuminate\Database\Eloquent\ModelNotFoundException $e) {
             return redirect()->route('history')->with('error', 'Item tidak ditemukan atau Anda tidak memiliki izin untuk menghapusnya.');
         } catch (\Exception $e) {
-            \Log::error("Deletion Error: " . $e->getMessage());
+            \Log::error("Deletion Error: " . $e->getMessage(), ['item_id' => $itemId, 'item_type' => $itemType]);
             return redirect()->route('history')->with('error', 'Terjadi kesalahan saat menghapus data.');
         }
     }
@@ -94,22 +100,39 @@ class HistoryController extends Controller
 
             [$itemType, $itemId] = $parts;
 
+            // Only allow document deletions in this bulk operation
+            if ($itemType !== 'document') {
+                $errors[] = "Tipe item tidak didukung untuk penghapusan massal: {$itemKey}";
+                continue;
+            }
+
+            if (!is_numeric($itemId)) {
+                $errors[] = "ID item tidak valid: {$itemKey}";
+                continue;
+            }
+
             try {
-                if (!is_numeric($itemId)) {
-                    throw new \InvalidArgumentException('ID item tidak valid');
+                $document = Document::where('id', $itemId)
+                                    ->where('user_id', $userId)
+                                    ->firstOrFail();
+
+                if (!empty($document->file_location)) {
+                    try {
+                        if (Storage::disk('public')->exists($document->file_location)) {
+                            Storage::disk('public')->delete($document->file_location);
+                        }
+                    } catch (\Exception $e) {
+                        \Log::warning("Could not delete storage file for Document {$document->id}: " . $e->getMessage());
+                    }
                 }
 
-                $item = Document::where('id', $itemId)->where('user_id', $userId)->firstOrFail();
-                if (!empty($item->file_location) && Storage::disk('public')->exists($item->file_location)) {
-                    Storage::disk('public')->delete($item->file_location);
-                }
-                $item->delete();
+                $document->delete();
                 $deletedCount++;
             } catch (\Illuminate\Database\Eloquent\ModelNotFoundException $e) {
-                $errors[] = "Item {$itemType} ID {$itemId} tidak ditemukan atau tidak memiliki izin.";
+                $errors[] = "Item document ID {$itemId} tidak ditemukan atau tidak memiliki izin.";
             } catch (\Exception $e) {
                 \Log::error("Bulk Deletion Error for {$itemKey}: " . $e->getMessage());
-                $errors[] = "Kesalahan saat menghapus item {$itemType} ID {$itemId}.";
+                $errors[] = "Kesalahan saat menghapus item document ID {$itemId}.";
             }
         }
 
