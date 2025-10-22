@@ -6,7 +6,6 @@ use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Storage;
 use App\Models\Document;
-use App\Models\TextEntry;
 use Illuminate\View\View;
 use Illuminate\Support\Collection;
 
@@ -17,9 +16,8 @@ class HistoryController extends Controller
     public function index(): View
     {
         $userId = Auth::id();
-
-        // 1. Ambil Dokumen dan standardisasi formatnya
         $documents = Document::where('user_id', $userId)
+                             ->orderBy('created_at', 'desc')
                              ->get()
                              ->map(function ($doc) {
                                  return [
@@ -28,37 +26,20 @@ class HistoryController extends Controller
                                      'created_at' => $doc->created_at,
                                      'name' => $doc->file_name,
                                      'upload_status' => $doc->upload_status,
-                                     'file_location' => $doc->file_location, // Khusus Dokumen
+                                     'file_location' => $doc->file_location,
                                  ];
                              });
 
-        // 2. Ambil Entri Teks dan standardisasi formatnya
-        $textEntries = TextEntry::where('user_id', $userId)
-                                 ->get()
-                                 ->map(function ($entry) {
-                                     return [
-                                         'id' => $entry->id,
-                                         'type' => 'text',
-                                         'created_at' => $entry->created_at,
-                                         'name' => $entry->title ?? 'Entri Teks',
-                                         'upload_status' => $entry->upload_status,
-                                         'file_location' => null, // Dibuat null agar konsisten
-                                     ];
-                                 });
-
-        // 3. Gabungkan dan urutkan
-        $history = $documents->merge($textEntries)
-                             ->sortByDesc('created_at');
-
-        // 4. Kirim sebagai $history
-        return view('history', compact('history'));
+        return view('history', [
+            'history' => $documents,
+        ]);
     }
 
     public function delete(Request $request)
     {
         $request->validate([
             'item_id' => 'required|integer',
-            'item_type' => 'required|in:document,text',
+            'item_type' => 'required|in:document',
         ]);
 
         $itemId = $request->input('item_id');
@@ -67,24 +48,16 @@ class HistoryController extends Controller
 
         try {
             if ($itemType === 'document') {
-                // Hapus Dokumen
                 $item = Document::where('id', $itemId)
                                 ->where('user_id', $userId)
                                 ->firstOrFail();
                 
-                // Hapus file dari storage SANGAT PENTING
-                \Illuminate\Support\Facades\Storage::disk('public')->delete($item->file_location);
+                if (!empty($item->file_location) && Storage::disk('public')->exists($item->file_location)) {
+                    Storage::disk('public')->delete($item->file_location);
+                }
 
                 $item->delete();
                 $message = 'Dokumen berhasil dihapus dari riwayat.';
-
-            } elseif ($itemType === 'text') {
-                // Hapus Entri Teks
-                $item = TextEntry::where('id', $itemId)
-                                 ->where('user_id', $userId)
-                                 ->firstOrFail();
-                $item->delete();
-                $message = 'Entri teks berhasil dihapus dari riwayat.';
 
             } else {
                 abort(400, 'Tipe item tidak valid.');
@@ -112,19 +85,25 @@ class HistoryController extends Controller
         $errors = [];
 
         foreach ($request->input('selected_items') as $itemKey) {
-            [$itemType, $itemId] = explode('_', $itemKey);
+            $parts = explode('_', $itemKey, 2);
+            if (count($parts) !== 2) {
+                $errors[] = "Format item tidak valid: {$itemKey}";
+                continue;
+            }
+
+            [$itemType, $itemId] = $parts;
 
             try {
-                if ($itemType === 'document') {
-                    $item = Document::where('id', $itemId)->where('user_id', $userId)->firstOrFail();
-                    \Illuminate\Support\Facades\Storage::disk('public')->delete($item->file_location);
-                    $item->delete();
-                    $deletedCount++;
-                } elseif ($itemType === 'text') {
-                    $item = TextEntry::where('id', $itemId)->where('user_id', $userId)->firstOrFail();
-                    $item->delete();
-                    $deletedCount++;
+                if (!is_numeric($itemId)) {
+                    throw new \InvalidArgumentException('ID item tidak valid');
                 }
+
+                $item = Document::where('id', $itemId)->where('user_id', $userId)->firstOrFail();
+                if (!empty($item->file_location) && Storage::disk('public')->exists($item->file_location)) {
+                    Storage::disk('public')->delete($item->file_location);
+                }
+                $item->delete();
+                $deletedCount++;
             } catch (\Illuminate\Database\Eloquent\ModelNotFoundException $e) {
                 $errors[] = "Item {$itemType} ID {$itemId} tidak ditemukan atau tidak memiliki izin.";
             } catch (\Exception $e) {

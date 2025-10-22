@@ -93,25 +93,18 @@
 
                     <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
                         @foreach($history as $item)
-                        
                             @php
-                                $isDocument = $item['type'] === 'document';
+                                // Karena aplikasi hanya mendukung dokumen sekarang,
+                                // asumsikan semua item di history adalah dokumen.
                                 $name = $item['name'];
                                 $status = ucfirst($item['upload_status'] ?? 'Selesai');
                                 $createdAt = $item['created_at']->format('d M Y, H:i');
-                                $itemIdKey = "{$item['type']}_{$item['id']}";
+                                $itemIdKey = "document_{$item['id']}"; // tetap gunakan prefix document_
                                 $isCompleted = strtolower($item['upload_status'] ?? '') === 'completed';
-                                $downloadable = $isDocument && $isCompleted; 
-                                
-                                if ($isDocument) {
-                                    $correctionUrl = route('correction.show', $item['id']);
-                                    $downloadUrl = route('document.download', $item['id']);
-                                    $typeBadge = 'Dokumen';
-                                } else {
-                                    $correctionUrl = route('text.correction.show', $item['id']);
-                                    $downloadUrl = null; 
-                                    $typeBadge = 'Teks';
-                                }
+                                $downloadable = $isCompleted;
+                                $correctionUrl = route('correction.show', $item['id']);
+                                $downloadUrl = route('document.download', $item['id']);
+                                $typeBadge = 'Dokumen';
                             @endphp
 
                         <div class="bg-white/60 backdrop-blur-sm rounded-2xl p-6 shadow-md hover:shadow-lg transition-all duration-300 border border-[#2a3a5a]/50 flex items-start gap-4">
@@ -179,7 +172,7 @@
                     <svg class="w-20 h-20 text-gray-500/60 mb-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/>
                     </svg>
-                    <p class="text-lg mb-6 italic">Belum ada riwayat pemeriksaan. Silakan unggah atau periksa teks.</p>
+                    <p class="text-lg mb-6 italic">Belum ada riwayat pemeriksaan. Silakan unggah dokumen untuk memulai pemeriksaan.</p>
                     <a href="{{ route('upload') }}" 
                        class="px-8 py-2 bg-white text-gray-900 rounded-full font-semibold text-lg hover:bg-gray-100 transition-all duration-200 shadow-lg">
                         Mulai Pemeriksaan
