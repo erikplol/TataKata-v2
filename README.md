@@ -12,19 +12,57 @@
 | 5025231146 | Salsabila Purnama |
 | 5025231307 | Rosidah Darman |
 
-## Deskripsi
-  TataKata adalah website berbasis AI yang membantu mahasiswa dalam menyempurnakan dokumen tugas akhir mereka agar sesuai dengan kaidah bahasa Indonesia yang baik dan benar. Dengan teknologi pemrosesan bahasa alami (NLP), TataKata mampu memeriksa kata baku, kalimat efektif, tanda baca, imbuhan, serta ejaan untuk memastikan tulisan sesuai dengan kaidah bahasa Indonesia. Selain itu, TataKata juga dilengkapi dengan fitur deteksi salah ketik (typo) dan translasi ke bahasa Indonesia sehingga sangat membantu mahasiswa.
-Website ini dirancang agar mudah digunakan. Mahasiswa cukup mendaftar dan login menggunakan akun email yang dimiliki. Lalu pengguna bisa memasukkan teks atau PDF, lalu sistem AI akan langsung memberikan analisis serta saran perbaikan yang detail. Tujuannya bukan hanya mengoreksi, tetapi juga mendidik pengguna agar lebih peka terhadap penggunaan bahasa Indonesia yang baik dan benar.
+## Deskripsi Program
+
+TataKata merupakan website berbasis AI yang membantu pengguna (mahasiswa) dalam menyempurnakan dokumen tugas akhir mereka sesuai dengan kaidah penulisan bahasa Indonesia baku. Dengan teknologi pemrosesan bahasa alami (NLP), TataKata mampu memeriksa kata baku, kalimat efektif, tanda baca, imbuhan, serta ejaan pada suatu karya tulis untuk memastikan apakah penulisan sudah sesuai dengan kaidah bahasa Indonesia yang baik dan benar.
+
+Website TataKata dirancang agar mudah digunakan oleh seluruh pengguna yang terlibat. Pengguna cukup mendaftar dan login menggunakan akun email yang dimiliki, yang setelah itu masuk ke dashboard website untuk input file tugas akhir bertipe PDF. Sistem AI akan langsung memberikan analisis serta saran perbaikan yang detail. Output dari website ini adalah perbandingan dari isi file PDF asli dan hasil penulisan yang sudah diintegrasikan dengan AI. Pengguna kemudian dapat mengunduh hasil analisis penulisan tugas akhir oleh AI dengan format `.md` ke perangkat.
 
 ## How to Run
-1. Jalankan instalasi `composer install` untuk backend dan `npm install` `npm run build` untuk frontend.
-2. Copy konfigurasi **.env** dengan command `cp -n .env.example .env` untuk Linux/macOS dan `Copy-Item .env.example .env` untuk Windows.
-3. Jalankan command `php artisan key:generate` untuk enkripsi data.
-4. Jalankan command `php artisan migrate:fresh` untuk ekspor database **mysql** ke sistem backend.
-5. Jalankan command `php artisan storage:link` untuk menyimpan dokumen.
-6. Sediakan 2 terminal untuk run program pada folder **Laravel**.
-7. Jalankan command `npm run dev` pada terminal 1 untuk compile aset frontend.
-8. Jalankan command `php artisan serve && php artisan queue:work --tries=3 --timeout=300` pada terminal 2 untuk mengakses program **Laravel** di browser dan  AI processing.
+1. Jalankan instalasi untuk backend dengan command
+   ```
+   composer install
+   ```
+   dan instalasi frontend dengan command
+   ```
+   npm install && npm run build
+   ```
+   
+2. Copy konfigurasi **.env** dengan command terlampir untuk perangkat Linux/macOS
+   ```
+   cp -n .env.example .env
+   ```
+   atau command di bawah untuk perangkat Windows
+   ```
+   Copy-Item .env.example .env
+   ```
 
-## Repositori lama
+3. Jalankan command terlampir untuk enkripsi data
+   ```
+   php artisan key:generate
+   ```
+
+4. Jalankan command terlampir untuk ekspor database **mysql** ke sistem backend
+   ```
+   php artisan migrate:fresh
+   ```
+   
+5. Jalankan command terlampir untuk menyimpan dokumen
+   ```
+   php artisan storage:link
+   ```
+   
+6. Sediakan 2 terminal untuk run program.
+   
+7. Jalankan command terlampir pada terminal 1 untuk compile aset frontend
+   ```
+   npm run dev
+   ```
+   
+8. Jalankan command terlampir pada terminal 2 untuk mengakses program backend di browser dan AI processing
+   ```
+   php artisan serve && php artisan queue:work --tries=3 --timeout=300
+   ```
+
+## Repositori Lama
 Link repositori lama: [TataKata Lama](https://github.com/salpurn/TataKata)
