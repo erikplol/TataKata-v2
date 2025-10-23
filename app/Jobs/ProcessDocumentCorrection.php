@@ -86,15 +86,15 @@ class ProcessDocumentCorrection implements ShouldQueue
             foreach ($chunks as $index => $chunk) {
                 \Log::info("🟦 Sending chunk " . ($index + 1) . "/" . count($chunks) . " to Gemini...");
 
-                $response = Http::timeout($timeoutDuration)->post($url, [
-                    'contents' => [
-                        [
-                            'parts' => [
-                                ['text' => "Perbaiki tata bahasa dan ejaan dalam bahasa Indonesia tanpa mengubah makna berikut:\n\n" . $chunk]
-                            ]
+            $response = Http::timeout($timeoutDuration)->post($url, [
+                'contents' => [
+                    [
+                        'parts' => [
+                            ['text' => "Perbaiki tata bahasa dan ejaan dalam bahasa Indonesia tanpa mengubah makna berikut. Jangan ubah format tata letak teksnya. Berikan dalam bentuk teks saja, dan hanya berikan teks hasilnya.\n\n" . $chunk]
                         ]
                     ]
-                ]);
+                ]
+            ]);
 
                 $data = $response->json();
 
