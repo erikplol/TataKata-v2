@@ -17,12 +17,11 @@
 Website ini dirancang agar mudah digunakan. Mahasiswa cukup mendaftar dan login menggunakan akun email yang dimiliki. Lalu pengguna bisa memasukkan teks atau PDF, lalu sistem AI akan langsung memberikan analisis serta saran perbaikan yang detail. Tujuannya bukan hanya mengoreksi, tetapi juga mendidik pengguna agar lebih peka terhadap penggunaan bahasa Indonesia yang baik dan benar.
 
 ## How to Run
-- Laravel
-2. Jalankan instalasi `composer install` untuk backend dan `npm install` `npm run build` untuk frontend.
-3. Copy konfigurasi **.env** dengan command `cp -n .env.example .env` untuk Linux/macOS dan `Copy-Item .env.example .env` untuk Windows.
-4. Jalankan command `php artisan key:generate` untuk enkripsi data.
-5. Jalankan command `php artisan migrate:fresh` untuk ekspor database **mysql** ke sistem backend.
-6. Jalankan command `php artisan storage:link` untuk menyimpan dokumen.
-7. Sediakan 2 terminal untuk run program pada folder **Laravel**.
-8. Jalankan command `npm run dev` pada terminal 1 untuk compile aset frontend.
-9. Jalankan command `php artisan serve && php artisan queue:work --tries=3 --timeout=300` pada terminal 2 untuk mengakses program **Laravel** di browser dan  AI processing.
+1. Jalankan instalasi `composer install` untuk backend dan `npm install` `npm run build` untuk frontend.
+2. Copy konfigurasi **.env** dengan command `cp -n .env.example .env` untuk Linux/macOS dan `Copy-Item .env.example .env` untuk Windows.
+3. Jalankan command `php artisan key:generate` untuk enkripsi data.
+4. Jalankan command `php artisan migrate:fresh` untuk ekspor database **mysql** ke sistem backend.
+5. Jalankan command `php artisan storage:link` untuk menyimpan dokumen.
+6. Sediakan 2 terminal untuk run program pada folder **Laravel**.
+7. Jalankan command `npm run dev` pada terminal 1 untuk compile aset frontend.
+8. Jalankan command `php artisan serve && php artisan queue:work --tries=3 --timeout=300` pada terminal 2 untuk mengakses program **Laravel** di browser dan  AI processing.
