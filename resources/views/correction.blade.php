@@ -113,20 +113,34 @@
 <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/dompurify@2.4.0/dist/purify.min.js"></script>
 
+<script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/dompurify@2.4.0/dist/purify.min.js"></script>
+
 <script>
     const correctedRaw = @json($correctedText ?? $corrected_text ?? 'Hasil koreksi akan ditampilkan di sini.');
 
+    const introPhraseRegex = /^(Tentu,\s*)?Berikut adalah perbaikan(nya)?(\s*tata bahasa dan ejaan( untuk kalimat-kalimat tersebut)?)? tanpa mengubah makna(nya)?[:\s]*/i;
+
+    let textToDisplay = correctedRaw;
+    
+    // Hanya coba bersihkan jika teks bukan placeholder
+    if (textToDisplay && textToDisplay !== 'Hasil koreksi akan ditampilkan di sini.') {
+        // Hapus frasa pengantar yang cocok
+        textToDisplay = textToDisplay.replace(introPhraseRegex, '');
+    }
+
     try {
-        const mdHtml = marked.parse(correctedRaw);
+        const mdHtml = marked.parse(textToDisplay); // Parse teks yang sudah bersih
         const safeHtml = DOMPurify.sanitize(mdHtml);
         document.getElementById('corrected-markdown').innerHTML = safeHtml;
     } catch (e) {
-        document.getElementById('corrected-markdown').textContent = correctedRaw;
+        document.getElementById('corrected-markdown').textContent = textToDisplay;
     }
 
     function applyAndDownload() {
+        // Gunakan teks yang sudah bersih untuk unduhan
         try {
-            const content = correctedRaw ?? '';
+            const content = textToDisplay ?? ''; 
             const blob = new Blob([content], { type: 'text/markdown;charset=utf-8' });
             const timestamp = new Date().toISOString().slice(0,19).replace(/[:T]/g, '-');
             const filename = `corrected-${timestamp}.md`;
