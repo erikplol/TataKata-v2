@@ -25,3 +25,6 @@ Website ini dirancang agar mudah digunakan. Mahasiswa cukup mendaftar dan login 
 6. Sediakan 2 terminal untuk run program pada folder **Laravel**.
 7. Jalankan command `npm run dev` pada terminal 1 untuk compile aset frontend.
 8. Jalankan command `php artisan serve && php artisan queue:work --tries=3 --timeout=300` pada terminal 2 untuk mengakses program **Laravel** di browser dan  AI processing.
+
+## Repositori lama
+Link repositori lama: [TataKata Lama](https://github.com/salpurn/TataKata)
