@@ -197,9 +197,10 @@ class DocumentController extends Controller
             abort(404, 'File tidak ditemukan.');
         }
 
-        // The upload currently stores files on the 'public' disk. Use that disk so
-        // both local and remote-backed disks (S3) are supported.
-        $diskName = 'public';
+    // Prefer the disk recorded on the Document (if present) so files stored on
+    // S3/MinIO or other remote disks are served correctly. Fall back to the
+    // configured default or 'public' for legacy records.
+    $diskName = $document->disk ?: config('filesystems.default') ?: 'public';
 
         try {
             $disk = \Storage::disk($diskName);

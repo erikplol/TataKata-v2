@@ -258,6 +258,72 @@ class ProcessDocumentCorrection implements ShouldQueue
                 'is_readable' => $debugReadable,
             ]);
 
+            // Quick validation: ensure the resolved file *looks* like a PDF by
+            // checking the leading bytes for the "%PDF-" signature. This helps
+            // detect cases where an HTML error page or truncated response was
+            // saved to disk (common with signed-URL 502/502 pages) which would
+            // otherwise cause the PDF parser to fail without an easy artifact.
+            try {
+                $isPdf = false;
+                if (!empty($file_path) && is_file($file_path) && is_readable($file_path)) {
+                    $h = @fopen($file_path, 'rb');
+                    if ($h !== false) {
+                        $first = @fread($h, 5);
+                        @fclose($h);
+                        if ($first === '%PDF-' || (is_string($first) && strpos($first, '%PDF') === 0)) {
+                            $isPdf = true;
+                        }
+                    }
+                }
+
+                if (! $isPdf) {
+                    // Save a small debug sample (first 1KB) to local storage for
+                    // debugging. Do not fail noisily if the save itself errors.
+                    try {
+                        $sample = @file_get_contents($file_path, false, null, 0, 1024);
+                        if ($sample !== false && !empty($sample)) {
+                            $sampleName = 'debug_samples/document_' . $document->id . '_' . time() . '.sample.txt';
+                            // Always attempt to save locally first so the worker keeps a copy
+                            try {
+                                Storage::disk('local')->put($sampleName, $sample);
+                                Log::warning('PDF header missing; saved debug sample locally', ['document_id' => $document->id, 'sample' => $sampleName]);
+                            } catch (\Throwable $e) {
+                                Log::warning('PDF header missing; failed to save local debug sample: ' . $e->getMessage(), ['document_id' => $document->id]);
+                            }
+
+                            // If an 's3' disk is configured, also attempt to persist the
+                            // sample there so it can be inspected via MinIO/R2/Spaces.
+                            try {
+                                if (array_key_exists('s3', (array) config('filesystems.disks', []))) {
+                                    try {
+                                        Storage::disk('s3')->put($sampleName, $sample);
+                                        Log::warning('Also saved debug sample to s3', ['document_id' => $document->id, 'sample' => $sampleName]);
+                                    } catch (\Throwable $e) {
+                                        Log::warning('Failed to save debug sample to s3: ' . $e->getMessage(), ['document_id' => $document->id]);
+                                    }
+                                }
+                            } catch (\Throwable $_) {
+                                // ignore errors while checking config
+                            }
+                        }
+                    } catch (\Throwable $_) {
+                        // ignore sample saving failures
+                    }
+
+                    Log::error("Document Correction Failed for ID {$document->id}: Invalid PDF data: Missing `%PDF-` header.");
+                    $document->update(['upload_status' => 'Failed', 'details' => 'Invalid PDF data: Missing %PDF header.']);
+
+                    // cleanup temporary file if we created one
+                    if (!empty($tempFile) && file_exists($tempFile)) {
+                        @unlink($tempFile);
+                    }
+
+                    return;
+                }
+            } catch (\Throwable $e) {
+                Log::warning('PDF header check failed: ' . $e->getMessage(), ['document_id' => $document->id]);
+            }
+
             $parser = new Parser();
             // update progress for parsing
             $this->pushProgress($document, 'Memulai parsing PDF...');
