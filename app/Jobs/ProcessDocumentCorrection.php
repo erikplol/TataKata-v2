@@ -53,10 +53,25 @@ class ProcessDocumentCorrection implements ShouldQueue
         // 3. Fall back to the default disk.
         $disk = null;
         $candidateDisks = [];
+
+        // Prefer an explicit disk saved on the Document, then prefer 'public' (local
+        // shared storage), and finally the other configured disks. We intentionally
+        // skip any disk literally named 's3' to avoid probing S3 when you don't
+        // want to use object storage in this deployment.
         if (!empty($document->disk)) {
             $candidateDisks[] = $document->disk;
         }
-        $candidateDisks = array_merge($candidateDisks, array_keys(config('filesystems.disks') ?? []));
+
+        if (!in_array('public', $candidateDisks, true)) {
+            $candidateDisks[] = 'public';
+        }
+
+        foreach (array_keys(config('filesystems.disks') ?? []) as $cfgDisk) {
+            if ($cfgDisk === 's3') continue; // skip s3 by request
+            if (!in_array($cfgDisk, $candidateDisks, true)) {
+                $candidateDisks[] = $cfgDisk;
+            }
+        }
 
         foreach ($candidateDisks as $candidate) {
             try {
