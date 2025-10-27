@@ -158,6 +158,25 @@ class ProcessDocumentCorrection implements ShouldQueue
         }
 
         try {
+            // DEBUG: surface the resolved local path and basic file checks so we can
+            // diagnose "file not found by worker" issues in logs quickly.
+            try {
+                $debugExists = isset($file_path) && file_exists($file_path);
+                $debugReadable = isset($file_path) && is_readable($file_path);
+            } catch (\Throwable $t) {
+                $debugExists = false;
+                $debugReadable = false;
+            }
+
+            Log::info('Debug file path resolved', [
+                'document_id' => $document->id,
+                'disk' => $disk ?? null,
+                'file_location' => $fileLocation ?? null,
+                'file_path' => $file_path ?? null,
+                'file_exists' => $debugExists,
+                'is_readable' => $debugReadable,
+            ]);
+
             $parser = new Parser();
             // update progress for parsing
             $this->pushProgress($document, 'Memulai parsing PDF...');
