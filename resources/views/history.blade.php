@@ -99,6 +99,7 @@
                                 $createdAt = $item['created_at']->format('d M Y, H:i');
                                 $itemIdKey = "document_{$item['id']}";
                                 $isCompleted = strtolower($item['upload_status'] ?? '') === 'completed';
+                                $isProcessing = strtolower($item['upload_status'] ?? '') === 'processing';
                                 $downloadable = $isCompleted;
                                 $correctionUrl = route('correction.show', $item['id']);
                                 $downloadUrl = route('document.download', $item['id']);
@@ -108,9 +109,10 @@
                         <div class="bg-white/60 backdrop-blur-sm rounded-xl sm:rounded-2xl p-4 sm:p-6 shadow-md hover:shadow-lg transition-all duration-300 border border-[#2a3a5a]/50 flex items-start gap-3 sm:gap-4">
                             
                             <div class="mt-1 flex-shrink-0">
-                                <input type="checkbox" name="selected_items[]" value="{{ $itemIdKey }}" 
-                                       class="item-checkbox form-checkbox h-4 w-4 sm:h-5 sm:w-5 text-blue-600 rounded mt-1"
-                                       data-downloadable="{{ $downloadable ? 'true' : 'false' }}">
+                    <input type="checkbox" name="selected_items[]" value="{{ $itemIdKey }}" 
+                        class="item-checkbox form-checkbox h-4 w-4 sm:h-5 sm:w-5 text-blue-600 rounded mt-1"
+                        data-downloadable="{{ $downloadable ? 'true' : 'false' }}"
+                        {{ $isProcessing ? 'disabled' : '' }}>
                             </div>
 
                             <div class="flex flex-col gap-2 sm:gap-3 flex-1 min-w-0">
@@ -146,20 +148,27 @@
                                         </a>
                                         @endif
 
-                                        <form method="POST" action="{{ route('history.delete') }}" 
-                                              onsubmit="return confirm('Apakah Anda yakin ingin menghapus riwayat \'{{ $name }}\'? Tindakan ini tidak bisa dibatalkan.');">
-                                            @csrf
-                                            @method('DELETE')
-                                            <input type="hidden" name="item_id" value="{{ $item['id'] }}">
-                                            <input type="hidden" name="item_type" value="{{ $item['type'] }}">
-                                            
-                                            <button type="submit"
-                                                    class="px-3 py-2 bg-red-500 text-white rounded-full hover:bg-red-600 transition shadow-md">
-                                                <svg class="w-4 h-4 sm:w-5 sm:h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3m-4 0h10"/>
-                                                </svg>
+                                        @if($isProcessing)
+                                            <button type="button" disabled title="Dokumen sedang diproses dan tidak bisa dihapus"
+                                                    class="px-3 py-2 bg-gray-300 text-white rounded-full transition shadow-inner text-xs">
+                                                Sedang diproses
                                             </button>
-                                        </form>
+                                        @else
+                                            <form method="POST" action="{{ route('history.delete') }}" 
+                                                  onsubmit="return confirm('Apakah Anda yakin ingin menghapus riwayat \'{{ $name }}\'? Tindakan ini tidak bisa dibatalkan.');">
+                                                @csrf
+                                                @method('DELETE')
+                                                <input type="hidden" name="item_id" value="{{ $item['id'] }}">
+                                                <input type="hidden" name="item_type" value="{{ $item['type'] }}">
+                                                
+                                                <button type="submit"
+                                                        class="px-3 py-2 bg-red-500 text-white rounded-full hover:bg-red-600 transition shadow-md">
+                                                    <svg class="w-4 h-4 sm:w-5 sm:h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3m-4 0h10"/>
+                                                    </svg>
+                                                </button>
+                                            </form>
+                                        @endif
                                     </div>
                                 </div>
                             </div>
@@ -254,7 +263,9 @@ document.addEventListener('DOMContentLoaded', function() {
 
     selectAllCheckbox.addEventListener('change', function() {
         itemCheckboxes.forEach(checkbox => {
-            checkbox.checked = selectAllCheckbox.checked;
+            if (!checkbox.disabled) {
+                checkbox.checked = selectAllCheckbox.checked;
+            }
         });
         updateBulkControls();
     });

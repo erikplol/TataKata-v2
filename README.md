@@ -64,5 +64,20 @@ Website TataKata dirancang agar mudah digunakan oleh seluruh pengguna yang terli
    php artisan serve && php artisan queue:work --tries=3 --timeout=300
    ```
 
+## Railway deployment (worker service)
+
+If you deploy to Railway and want a separate background worker service, create a second Railway service that uses the same repository and Dockerfile but set the start command to run the queue worker.
+
+Recommended start command for the Railway worker service:
+
+```
+sh docker/entrypoints/worker.sh
+```
+
+This script will run `php artisan queue:work` with sensible defaults. You can override options by setting the `QUEUE_WORKER_OPTS` environment variable in Railway (for example `--sleep=3 --tries=3 --timeout=300 --memory=512`).
+
+Make sure both the web service and the worker service have the same DB and queue environment variables set (DB_HOST, DB_DATABASE, DB_USERNAME, DB_PASSWORD, QUEUE_CONNECTION). Run `php artisan migrate --force` using a Railway one-off task before starting the worker.
+
+
 ## Repositori Lama
 Link repositori lama: [TataKata Lama](https://github.com/salpurn/TataKata)
