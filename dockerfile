@@ -23,18 +23,18 @@ RUN npm run build
 FROM php:8.2-fpm AS backend
 
 # Install dependencies
-RUN apt-get update && apt-get install -y \
-    git \
-    unzip \
-    libpq-dev \
-    libzip-dev \
-    libpng-dev \
-    libonig-dev \
-    libxml2-dev \
-    zip \
-    curl \
-    supervisor \
-    && docker-php-ext-install pdo_mysql mbstring zip exif pcntl bcmath gd
+RUN apt-get update && apt-get install -y \\
+    git \\
+    unzip \\
+    libpq-dev \\
+    libzip-dev \\
+    libpng-dev \\
+    libonig-dev \\
+    libxml2-dev \\
+    zip \\
+    curl \\
+    supervisor \\
+    && docker-php-ext-install pdo_mysql mbstring zip exif pcntl bcmath gd xml
 
 # Install Composer
 COPY --from=composer:2 /usr/bin/composer /usr/bin/composer
