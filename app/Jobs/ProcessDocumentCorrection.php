@@ -15,6 +15,8 @@ use Illuminate\Support\Facades\Cache;
 use Illuminate\Http\Client\Pool;
 use Illuminate\Support\Str;
 use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Facades\URL;
+use Illuminate\Support\Facades\Http as HttpFacade;
 
 
 class ProcessDocumentCorrection implements ShouldQueue
@@ -124,8 +126,30 @@ class ProcessDocumentCorrection implements ShouldQueue
                     $file_path = $tempFile;
                 }
             } else {
-                $document->update(['upload_status' => 'Failed', 'details' => 'File tidak ditemukan oleh worker.']);
-                return;
+                // As a fallback when the worker cannot read local storage (separate
+                // containers), attempt to fetch the original via a temporary signed
+                // URL from the web app. This requires the `correction.original` route
+                // to accept signed requests (handled in the controller).
+                try {
+                    $tempFile = tempnam(sys_get_temp_dir(), 'doc_');
+                    $signedUrl = URL::temporarySignedRoute('correction.original', now()->addMinutes(10), ['document' => $document->id]);
+
+                    // Stream the remote file into the temp file to avoid memory pressure
+                    $response = HttpFacade::withOptions(['timeout' => 60, 'sink' => $tempFile])->get($signedUrl);
+                    if (! ($response->successful() || $response->status() === 200)) {
+                        @unlink($tempFile);
+                        $document->update(['upload_status' => 'Failed', 'details' => 'File tidak ditemukan oleh worker.']);
+                        return;
+                    }
+
+                    $file_path = $tempFile; // use the downloaded file
+                    Log::info("Fallback download successful for Document ID {$document->id}, using temp file: {$tempFile}");
+                } catch (\Throwable $e) {
+                    Log::warning('Fallback download via signed URL failed: ' . $e->getMessage());
+                    if (!empty($tempFile) && file_exists($tempFile)) @unlink($tempFile);
+                    $document->update(['upload_status' => 'Failed', 'details' => 'File tidak ditemukan oleh worker.']);
+                    return;
+                }
             }
         } catch (\Throwable $e) {
             Log::error("Error resolving file for Document ID {$document->id}: " . $e->getMessage());

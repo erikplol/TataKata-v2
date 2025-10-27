@@ -182,8 +182,14 @@ class DocumentController extends Controller
     {
         $document = Document::findOrFail($id);
 
-        if ($document->user_id !== Auth::id()) {
-            abort(403, 'Anda tidak memiliki akses ke file ini.');
+        // Allow access if the request carries a valid signed URL OR the
+        // authenticated user owns the document. This enables the worker
+        // to fetch the original file via a temporary signed URL when the
+        // worker cannot access the web container's local filesystem.
+        if (! request()->hasValidSignature()) {
+            if ($document->user_id !== Auth::id()) {
+                abort(403, 'Anda tidak memiliki akses ke file ini.');
+            }
         }
 
         $path = $document->file_location;
