@@ -30,12 +30,13 @@ class DocumentController extends Controller
             $document_name = $request->input('document_name');
 
             $filename = time() . '_' . preg_replace('/[^A-Za-z0-9_-]/', '_', pathinfo($file->getClientOriginalName(), PATHINFO_FILENAME)) . '.pdf';
-            $path = $file->storeAs('documents', $filename, 'public');
+            $usedDisk = 'public';
+            $path = $file->storeAs('documents', $filename, $usedDisk);
 
             // Debug info: record which DB driver and filesystem disk are in use, and where the file landed
             \Log::info('Upload: stored file', [
                 'file_path' => $path,
-                'disk' => config('filesystems.default'),
+                'disk' => $usedDisk,
                 'db_driver' => config('database.default'),
                 'user_id' => Auth::id(),
             ]);
@@ -44,6 +45,7 @@ class DocumentController extends Controller
                 'user_id' => Auth::id(),
                 'file_name' => $document_name,
                 'file_location' => $path,
+                'disk' => $usedDisk,
                 'upload_status' => 'Processing', 
             ]);
 
@@ -170,5 +172,67 @@ class DocumentController extends Controller
         return response($correctedText, 200)
             ->header('Content-Type', 'text/markdown')
             ->header('Content-Disposition', "attachment; filename=\"{$filename}\"");
+    }
+
+    /**
+     * Stream or redirect to the original uploaded PDF so users can view it while processing.
+     */
+    public function viewOriginal($id)
+    {
+        $document = Document::findOrFail($id);
+
+        if ($document->user_id !== Auth::id()) {
+            abort(403, 'Anda tidak memiliki akses ke file ini.');
+        }
+
+        $path = $document->file_location;
+        if (empty($path)) {
+            abort(404, 'File tidak ditemukan.');
+        }
+
+        // The upload currently stores files on the 'public' disk. Use that disk so
+        // both local and remote-backed disks (S3) are supported.
+        $diskName = 'public';
+
+        try {
+            $disk = \Storage::disk($diskName);
+
+            // For local drivers we can return a local file path
+            if (method_exists($disk, 'path')) {
+                $localPath = $disk->path($path);
+                if (file_exists($localPath)) {
+                    return response()->file($localPath, [
+                        'Content-Type' => 'application/pdf',
+                        'Content-Disposition' => 'inline; filename="' . basename($localPath) . '"'
+                    ]);
+                }
+            }
+
+            // If the disk supports temporaryUrl (S3/compatible), redirect to it
+            if (method_exists($disk, 'temporaryUrl')) {
+                $url = $disk->temporaryUrl($path, now()->addMinutes(15));
+                return redirect()->away($url);
+            }
+
+            // Fallback: stream the file through the app
+            $stream = $disk->readStream($path);
+            if ($stream === false) {
+                abort(404, 'File tidak dapat diakses.');
+            }
+
+            return response()->stream(function () use ($stream) {
+                fpassthru($stream);
+                if (is_resource($stream)) {
+                    fclose($stream);
+                }
+            }, 200, [
+                'Content-Type' => 'application/pdf',
+                'Content-Disposition' => 'inline; filename="' . ($document->file_name ?: 'document') . '.pdf"'
+            ]);
+
+        } catch (\Exception $e) {
+            \Log::error('Error serving original file', ['document_id' => $document->id, 'error' => $e->getMessage()]);
+            abort(500, 'Terjadi kesalahan saat mengakses file.');
+        }
     }
 }

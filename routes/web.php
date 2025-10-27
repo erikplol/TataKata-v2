@@ -28,6 +28,7 @@ Route::middleware('auth')->group(function () {
     Route::get('/history/bulk-download', [HistoryController::class, 'bulkDownload'])->name('history.bulk-download');
     Route::get('/correction/status/{document}', [DocumentController::class, 'showStatus'])->name('correction.status');
     Route::get('/correction/check-status/{document}', [DocumentController::class, 'checkStatus'])->name('correction.check-status');
+    Route::get('/correction/{document}/original', [DocumentController::class, 'viewOriginal'])->name('correction.original');
     Route::post('/history/bulk-delete', [\App\Http\Controllers\HistoryController::class, 'bulkDelete'])->name('history.bulk-delete.post');
     Route::get('/correction/{document}', [DocumentController::class, 'showCorrection'])->name('correction.show');
 });

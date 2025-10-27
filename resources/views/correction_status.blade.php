@@ -23,6 +23,12 @@
                 Status: {{ $document->upload_status }}...
             </p>
             <p id="status-details" class="text-sm sm:text-base text-gray-500 mt-2">{{ $document->details ?? '' }}</p>
+            <div class="w-full mt-4 flex gap-3 justify-center">
+                <a href="{{ route('correction.original', $document->id) }}" target="_blank" rel="noopener noreferrer"
+                   class="px-4 py-2 bg-white border border-gray-300 text-gray-700 rounded-md shadow-sm hover:bg-gray-50">
+                    Lihat Dokumen Asli
+                </a>
+            </div>
             <div id="progress-panel" class="w-full mt-4 text-left">
                 <h4 class="text-sm font-semibold text-[#556080] mb-2">Progres</h4>
                 <ul id="progress-list" class="text-sm text-gray-600 space-y-1 max-h-40 overflow-auto pr-2">

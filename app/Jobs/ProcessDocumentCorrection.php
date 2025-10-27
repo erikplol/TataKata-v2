@@ -45,8 +45,39 @@ class ProcessDocumentCorrection implements ShouldQueue
         // Resolve file location using the configured filesystem disk. In deployments like Railway
         // the app and worker don't share local disk, so we must support remote disks (s3) by
         // streaming the file to a temporary local path for processing.
-        $disk = config('filesystems.default');
         $fileLocation = $document->file_location;
+
+        // Determine which disk actually contains the file. We try these in order:
+        // 1. If the document record stores a disk (future-proof), try that.
+        // 2. Iterate configured disks and pick the first one where the file exists.
+        // 3. Fall back to the default disk.
+        $disk = null;
+        $candidateDisks = [];
+        if (!empty($document->disk)) {
+            $candidateDisks[] = $document->disk;
+        }
+        $candidateDisks = array_merge($candidateDisks, array_keys(config('filesystems.disks') ?? []));
+
+        foreach ($candidateDisks as $candidate) {
+            try {
+                if (empty($candidate)) continue;
+                if (Storage::disk($candidate)->exists($fileLocation)) {
+                    $disk = $candidate;
+                    break;
+                }
+            } catch (\Throwable $e) {
+                // ignore misconfigured disk adapters and continue
+                Log::warning("Storage disk check failed for candidate '{$candidate}': " . $e->getMessage());
+                continue;
+            }
+        }
+
+        if (empty($disk)) {
+            // fallback to configured default
+            $disk = config('filesystems.default');
+        }
+
+        Log::info("Resolved file disk for Document ID {$document->id}: {$disk}");
 
         // Helper: get a usable local path to the uploaded file. If the disk exposes a local path
         // return it; otherwise stream the file to a temp file and return that path. Caller must
