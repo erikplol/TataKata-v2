@@ -30,7 +30,8 @@ class DocumentController extends Controller
             $document_name = $request->input('document_name');
 
             $filename = time() . '_' . preg_replace('/[^A-Za-z0-9_-]/', '_', pathinfo($file->getClientOriginalName(), PATHINFO_FILENAME)) . '.pdf';
-            $usedDisk = 'public';
+            // Use the configured default filesystem disk so switching to S3 is possible
+            $usedDisk = config('filesystems.default') ?: 'public';
             $path = $file->storeAs('documents', $filename, $usedDisk);
 
             // Debug info: record which DB driver and filesystem disk are in use, and where the file landed
