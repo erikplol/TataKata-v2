@@ -14,6 +14,7 @@ use Smalot\PdfParser\Parser;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Http\Client\Pool;
 use Illuminate\Support\Str;
+use Illuminate\Support\Facades\Storage;
 
 
 class ProcessDocumentCorrection implements ShouldQueue
@@ -40,10 +41,49 @@ class ProcessDocumentCorrection implements ShouldQueue
 
         // mark started (helps the UI know processing began and provides initial details)
         $this->pushProgress($document, 'Memulai pemrosesan dokumen...', 'Processing');
-        $file_path = storage_path("app/public/{$document->file_location}");
-        
-        if (!file_exists($file_path)) {
-            $document->update(['upload_status' => 'Failed', 'details' => 'File tidak ditemukan oleh worker.']);
+
+        // Resolve file location using the configured filesystem disk. In deployments like Railway
+        // the app and worker don't share local disk, so we must support remote disks (s3) by
+        // streaming the file to a temporary local path for processing.
+        $disk = config('filesystems.default');
+        $fileLocation = $document->file_location;
+
+        // Helper: get a usable local path to the uploaded file. If the disk exposes a local path
+        // return it; otherwise stream the file to a temp file and return that path. Caller must
+        // unlink the temp file when done if one is created.
+        $tempFile = null;
+        try {
+            if (Storage::disk($disk)->exists($fileLocation)) {
+                // If the disk is local (public/local), we can get the real path
+                // Storage::disk(...)->path() works for local drivers.
+                try {
+                    $file_path = Storage::disk($disk)->path($fileLocation);
+                } catch (\Exception $e) {
+                    // Some drivers (s3) don't support path(); fall back to stream copy below
+                    $file_path = null;
+                }
+
+                if (empty($file_path) || !file_exists($file_path)) {
+                    // stream to temp
+                    $stream = Storage::disk($disk)->readStream($fileLocation);
+                    if ($stream === false) {
+                        $document->update(['upload_status' => 'Failed', 'details' => 'File tidak dapat dibaca oleh worker.']);
+                        return;
+                    }
+                    $tempFile = tempnam(sys_get_temp_dir(), 'doc_');
+                    $out = fopen($tempFile, 'w');
+                    stream_copy_to_stream($stream, $out);
+                    fclose($out);
+                    if (is_resource($stream)) fclose($stream);
+                    $file_path = $tempFile;
+                }
+            } else {
+                $document->update(['upload_status' => 'Failed', 'details' => 'File tidak ditemukan oleh worker.']);
+                return;
+            }
+        } catch (\Throwable $e) {
+            Log::error("Error resolving file for Document ID {$document->id}: " . $e->getMessage());
+            $document->update(['upload_status' => 'Failed', 'details' => 'File tidak dapat diakses oleh worker.']);
             return;
         }
 
@@ -79,10 +119,20 @@ class ProcessDocumentCorrection implements ShouldQueue
             $document->save();
             $document->fresh();
 
+            // cleanup temporary file if we created one from remote storage
+            if (!empty($tempFile) && file_exists($tempFile)) {
+                @unlink($tempFile);
+            }
+
             Log::info("Document ID {$document->id} corrected successfully.");
 
         } catch (\Exception $e) {
             Log::error("Document Correction Failed for ID {$document->id}: " . $e->getMessage());
+            // cleanup temp file if used
+            if (!empty($tempFile) && file_exists($tempFile)) {
+                @unlink($tempFile);
+            }
+
             $document->update(['upload_status' => 'Failed', 'details' => 'Pemrosesan gagal: ' . substr($e->getMessage(), 0, 250)]);
         }
     }

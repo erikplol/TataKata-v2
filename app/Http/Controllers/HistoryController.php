@@ -59,8 +59,7 @@ class HistoryController extends Controller
             // Prevent deleting documents that are currently being processed.
             $statusLower = strtolower(trim($document->upload_status ?? ''));
             if ($statusLower === 'processing') {
-                $errors[] = "Dokumen ID {$itemId} sedang diproses dan tidak dapat dihapus.";
-                continue;
+                return redirect()->route('history')->with('error', "Dokumen ID {$itemId} sedang diproses dan tidak dapat dihapus.");
             }
 
             // Safely attempt to delete the stored file (log but don't fail the whole operation)
