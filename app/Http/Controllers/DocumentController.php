@@ -25,31 +25,48 @@ class DocumentController extends Controller
             'document_name' => 'required|string',
             'file' => 'required|mimes:pdf|max:10240',
         ]);
+        try {
+            $file = $request->file('file');
+            $document_name = $request->input('document_name');
 
-        $file = $request->file('file');
-        $document_name = $request->input('document_name');
+            $filename = time() . '_' . preg_replace('/[^A-Za-z0-9_-]/', '_', pathinfo($file->getClientOriginalName(), PATHINFO_FILENAME)) . '.pdf';
+            $path = $file->storeAs('documents', $filename, 'public');
 
-        $filename = time() . '_' . preg_replace('/[^A-Za-z0-9_-]/', '_', pathinfo($file->getClientOriginalName(), PATHINFO_FILENAME)) . '.pdf';
-        $path = $file->storeAs('documents', $filename, 'public');
+            // Debug info: record which DB driver and filesystem disk are in use, and where the file landed
+            \Log::info('Upload: stored file', [
+                'file_path' => $path,
+                'disk' => config('filesystems.default'),
+                'db_driver' => config('database.default'),
+                'user_id' => Auth::id(),
+            ]);
 
-        $document = Document::create([
-            'user_id' => Auth::id(),
-            'file_name' => $document_name,
-            'file_location' => $path,
-            'upload_status' => 'Processing', 
-        ]);
+            $document = Document::create([
+                'user_id' => Auth::id(),
+                'file_name' => $document_name,
+                'file_location' => $path,
+                'upload_status' => 'Processing', 
+            ]);
 
-        History::create([
-            'user_id' => Auth::id(),
-            'document_id' => $document->id,
-            'activity_type' => 'upload',
-            'details' => 'Dokumen diunggah oleh user',
-        ]);
+            \Log::info('Upload: created Document record', [
+                'document_id' => $document->id,
+                'file_location' => $document->file_location,
+            ]);
 
-        ProcessDocumentCorrection::dispatch($document);
+            History::create([
+                'user_id' => Auth::id(),
+                'document_id' => $document->id,
+                'activity_type' => 'upload',
+                'details' => 'Dokumen diunggah oleh user',
+            ]);
 
-        return redirect()->route('correction.status', $document->id) 
-                         ->with('success', 'Dokumen berhasil diunggah dan sedang diproses...');
+            ProcessDocumentCorrection::dispatch($document);
+
+            return redirect()->route('correction.status', $document->id) 
+                             ->with('success', 'Dokumen berhasil diunggah dan sedang diproses...');
+        } catch (\Throwable $e) {
+            \Log::error('Upload failed', ['message' => $e->getMessage(), 'trace' => $e->getTraceAsString()]);
+            return back()->with('error', 'Terjadi kesalahan saat mengunggah dokumen. Silakan coba lagi.');
+        }
     }
 
     public function checkStatus($id)
