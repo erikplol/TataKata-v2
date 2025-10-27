@@ -1,0 +1,32 @@
+version: '3.8'
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: dockerfile
+    image: tatakata_app:latest
+    env_file:
+      - .env
+    volumes:
+      - ./:/var/www/html
+      - ./storage:/var/www/html/storage
+    ports:
+      - "8000:8000"
+
+  worker:
+    build:
+      context: .
+      dockerfile: dockerfile
+    image: tatakata_worker:latest
+    env_file:
+      - .env
+    volumes:
+      - ./:/var/www/html
+      - ./storage:/var/www/html/storage
+    command: php artisan queue:work --sleep=3 --tries=3 --timeout=300 --memory=256
+    restart: unless-stopped
+
+volumes:
+  # keep local storage for user uploads
+  db_data: {}
