@@ -108,22 +108,38 @@ class ProcessDocumentCorrection implements ShouldQueue
                     $file_path = Storage::disk($disk)->path($fileLocation);
                 } catch (\Exception $e) {
                     // Some drivers (s3) don't support path(); fall back to stream copy below
+                    Log::info("Storage::path not available for disk {$disk}, will attempt readStream.", ['document_id' => $document->id, 'exception' => $e->getMessage()]);
                     $file_path = null;
                 }
 
+                // If we couldn't get a native path or the path doesn't exist, stream to a temp file
                 if (empty($file_path) || !file_exists($file_path)) {
                     // stream to temp
-                    $stream = Storage::disk($disk)->readStream($fileLocation);
+                    $stream = null;
+                    try {
+                        $stream = Storage::disk($disk)->readStream($fileLocation);
+                    } catch (\Throwable $e) {
+                        Log::warning("Storage::readStream threw for disk {$disk} file {$fileLocation}: " . $e->getMessage(), ['document_id' => $document->id]);
+                        $stream = false;
+                    }
+
                     if ($stream === false) {
+                        Log::error("readStream returned false for disk={$disk} file={$fileLocation}", ['document_id' => $document->id]);
                         $document->update(['upload_status' => 'Failed', 'details' => 'File tidak dapat dibaca oleh worker.']);
                         return;
                     }
+
                     $tempFile = tempnam(sys_get_temp_dir(), 'doc_');
                     $out = fopen($tempFile, 'w');
-                    stream_copy_to_stream($stream, $out);
+                    $bytes = stream_copy_to_stream($stream, $out);
                     fclose($out);
                     if (is_resource($stream)) fclose($stream);
+
+                    Log::info('Streamed remote/local disk file into temp file', ['document_id' => $document->id, 'disk' => $disk, 'file_location' => $fileLocation, 'tempFile' => $tempFile, 'bytes_copied' => $bytes]);
+
                     $file_path = $tempFile;
+                } else {
+                    Log::info('Resolved native file path for document', ['document_id' => $document->id, 'disk' => $disk, 'file_path' => $file_path]);
                 }
             } else {
                 // As a fallback when the worker cannot read local storage (separate
@@ -136,23 +152,27 @@ class ProcessDocumentCorrection implements ShouldQueue
 
                     // Stream the remote file into the temp file to avoid memory pressure
                     $response = HttpFacade::withOptions(['timeout' => 60, 'sink' => $tempFile])->get($signedUrl);
-                    if (! ($response->successful() || $response->status() === 200)) {
+
+                    $status = method_exists($response, 'status') ? $response->status() : null;
+                    if (! ($response->successful() || $status === 200)) {
+                        $body = method_exists($response, 'body') ? $response->body() : null;
+                        Log::warning('Fallback download failed', ['document_id' => $document->id, 'signed_url' => $signedUrl, 'status' => $status, 'body_snippet' => is_string($body) ? substr($body, 0, 500) : null]);
                         @unlink($tempFile);
                         $document->update(['upload_status' => 'Failed', 'details' => 'File tidak ditemukan oleh worker.']);
                         return;
                     }
 
                     $file_path = $tempFile; // use the downloaded file
-                    Log::info("Fallback download successful for Document ID {$document->id}, using temp file: {$tempFile}");
+                    Log::info("Fallback download successful for Document ID {$document->id}, using temp file: {$tempFile}", ['document_id' => $document->id]);
                 } catch (\Throwable $e) {
-                    Log::warning('Fallback download via signed URL failed: ' . $e->getMessage());
+                    Log::warning('Fallback download via signed URL failed: ' . $e->getMessage(), ['document_id' => $document->id, 'exception' => $e->getTraceAsString()]);
                     if (!empty($tempFile) && file_exists($tempFile)) @unlink($tempFile);
                     $document->update(['upload_status' => 'Failed', 'details' => 'File tidak ditemukan oleh worker.']);
                     return;
                 }
             }
         } catch (\Throwable $e) {
-            Log::error("Error resolving file for Document ID {$document->id}: " . $e->getMessage());
+            Log::error("Error resolving file for Document ID {$document->id}: " . $e->getMessage(), ['trace' => $e->getTraceAsString()]);
             $document->update(['upload_status' => 'Failed', 'details' => 'File tidak dapat diakses oleh worker.']);
             return;
         }
