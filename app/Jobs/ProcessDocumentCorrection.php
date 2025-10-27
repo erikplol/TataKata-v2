@@ -208,16 +208,58 @@ class ProcessDocumentCorrection implements ShouldQueue
                         }
 
                         try {
-                            $stream = fopen($file_path, 'r');
+                            // Open in binary mode and ensure the stream pointer is at
+                            // the start. Some drivers expect a fresh stream or a
+                            // rewound stream; failing to rewind can result in
+                            // truncated/corrupt uploads.
+                            $stream = @fopen($file_path, 'rb');
                             if ($stream !== false) {
+                                // Ensure pointer is at start
+                                if (is_resource($stream) && ftell($stream) !== 0) {
+                                    rewind($stream);
+                                }
+
                                 Storage::disk($targetDisk)->put($fileLocation, $stream);
+
+                                // close stream after upload
                                 if (is_resource($stream)) fclose($stream);
-                                Log::info('Persisted fallback-downloaded file to disk', ['document_id' => $document->id, 'disk' => $targetDisk, 'file_location' => $fileLocation]);
+
+                                Log::info('Persisted fallback-downloaded file to disk (stream)', ['document_id' => $document->id, 'disk' => $targetDisk, 'file_location' => $fileLocation]);
+
+                                // Verify sizes match when possible to detect corruption
+                                try {
+                                    $localSize = is_file($file_path) ? filesize($file_path) : null;
+                                    $remoteSize = null;
+                                    if (!is_null($localSize)) {
+                                        $remoteSize = Storage::disk($targetDisk)->size($fileLocation);
+                                    }
+
+                                    if (!is_null($localSize) && !is_null($remoteSize) && $localSize !== $remoteSize) {
+                                        Log::warning('Size mismatch after persistence; attempting memory fallback upload', ['document_id' => $document->id, 'local' => $localSize, 'remote' => $remoteSize]);
+
+                                        // Fallback: read into memory and retry (safe for typical PDF sizes; adjust if you expect very large files)
+                                        try {
+                                            $contents = @file_get_contents($file_path);
+                                            if ($contents !== false) {
+                                                Storage::disk($targetDisk)->put($fileLocation, $contents);
+                                                Log::info('Fallback memory upload succeeded', ['document_id' => $document->id, 'disk' => $targetDisk, 'file_location' => $fileLocation]);
+                                            } else {
+                                                Log::warning('Fallback memory upload failed: could not read local file', ['document_id' => $document->id]);
+                                            }
+                                        } catch (\Throwable $e) {
+                                            Log::warning('Fallback memory upload threw: ' . $e->getMessage(), ['document_id' => $document->id]);
+                                        }
+                                    }
+                                } catch (\Throwable $_) {
+                                    // ignore size check failures
+                                }
 
                                 if ($document->disk !== $targetDisk) {
                                     $document->disk = $targetDisk;
                                     $document->save();
                                 }
+                            } else {
+                                Log::warning('Could not open file for persistence', ['document_id' => $document->id, 'path' => $file_path]);
                             }
                         } catch (\Throwable $e) {
                             Log::warning('Failed to persist fallback-downloaded file: ' . $e->getMessage(), ['document_id' => $document->id]);
