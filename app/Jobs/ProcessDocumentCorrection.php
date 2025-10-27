@@ -19,25 +19,27 @@ use Illuminate\Support\Str;
 class ProcessDocumentCorrection implements ShouldQueue
 {
     use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
-
     protected $document;
+    protected $documentId;
     public $timeout = 300;
 
     public function __construct(Document $document)
     {
         $this->document = $document->withoutRelations();
+        $this->documentId = $document->id;
     }
 
     public function handle()
     {
-        $document = $this->document;
-        // mark started (helps the UI know processing began and provides initial details)
-        try {
-            $document->update(['upload_status' => 'Processing', 'details' => 'Memulai pemrosesan dokumen...']);
-        } catch (\Throwable $e) {
-            // best-effort: log and continue; model fillable has been updated to include details
-            Log::warning("Could not write initial processing status for Document ID {$document->id}: " . $e->getMessage());
+        // Always operate on the live DB record (in case it was deleted while queued)
+        $document = Document::find($this->documentId);
+        if (! $document) {
+            Log::warning("Document ID {$this->documentId} no longer exists; aborting job.");
+            return;
         }
+
+        // mark started (helps the UI know processing began and provides initial details)
+        $this->pushProgress($document, 'Memulai pemrosesan dokumen...', 'Processing');
         $file_path = storage_path("app/public/{$document->file_location}");
         
         if (!file_exists($file_path)) {
@@ -48,11 +50,7 @@ class ProcessDocumentCorrection implements ShouldQueue
         try {
             $parser = new Parser();
             // update progress for parsing
-            try {
-                $document->update(['details' => 'Memulai parsing PDF...']);
-            } catch (\Throwable $e) {
-                Log::warning("Could not update parsing details for Document ID {$document->id}: " . $e->getMessage());
-            }
+            $this->pushProgress($document, 'Memulai parsing PDF...');
             $pdf = $parser->parseFile($file_path);
             $original_text = trim($pdf->getText());
 
@@ -65,11 +63,7 @@ class ProcessDocumentCorrection implements ShouldQueue
             $clean_text = preg_replace('/[[:cntrl:]]/', '', $clean_text);
             $original_text = $clean_text;
             // indicate we're preparing chunks / checking cache
-            try {
-                $document->update(['details' => 'Memecah dokumen menjadi potongan dan memeriksa cache...']);
-            } catch (\Throwable $e) {
-                Log::warning("Could not update chunking details for Document ID {$document->id}: " . $e->getMessage());
-            }
+            $this->pushProgress($document, 'Memecah dokumen menjadi potongan dan memeriksa cache...');
 
             $corrected_text = $this->correctTextWithGemini($original_text);
 
@@ -81,7 +75,7 @@ class ProcessDocumentCorrection implements ShouldQueue
             $document->original_text = $original_text;
             $document->corrected_text = $corrected_text;
             $document->upload_status = 'Completed';
-            $document->details = 'Koreksi selesai.';
+            $this->pushProgress($document, 'Koreksi selesai.', 'Completed');
             $document->save();
             $document->fresh();
 
@@ -142,11 +136,13 @@ class ProcessDocumentCorrection implements ShouldQueue
             Log::info("Chunk cache hits: {$cacheHits}/{$chunkCount}");
 
             // update document with chunking/cache summary so UI can show progress
-            try {
-                $this->document->update(['details' => "Memproses dokumen: panjang={$textLen} chars, potongan={$chunkCount}, cache_hits={$cacheHits}"]);
-            } catch (\Throwable $e) {
-                Log::warning("Could not update chunk/cache details for Document ID {$this->document->id}: " . $e->getMessage());
+            $document = Document::find($this->documentId);
+            if (! $document) {
+                Log::warning("Document ID {$this->documentId} not found when updating chunk/cache details; aborting.");
+                return implode("\n\n", $correctedChunks);
             }
+
+            $this->pushProgress($document, "Memproses dokumen: panjang={$textLen} chars, potongan={$chunkCount}, cache_hits={$cacheHits}");
 
             if (empty($toSend)) {
                 $result = implode("\n\n", $correctedChunks);
@@ -168,11 +164,13 @@ class ProcessDocumentCorrection implements ShouldQueue
                 Log::info("Sending batch {$batchNumber}/{$totalBatches} (size=" . count($batch) . ") to Gemini...");
 
                 // update progress so UI can display current batch being processed
-                try {
-                    $this->document->update(['details' => "Mengirim batch {$batchNumber}/{$totalBatches} ke Gemini (size=" . count($batch) . ")"]);
-                } catch (\Throwable $e) {
-                    Log::warning("Could not update batch details for Document ID {$this->document->id}: " . $e->getMessage());
+                $document = Document::find($this->documentId);
+                if (! $document) {
+                    Log::warning("Document ID {$this->documentId} not found before sending batch {$batchNumber}; aborting.");
+                    return implode("\n\n", $correctedChunks);
                 }
+
+                $this->pushProgress($document, "Mengirim batch {$batchNumber}/{$totalBatches} ke Gemini (size=" . count($batch) . ")");
 
                 // Prepare payload descriptors so we can match responses to indices
                 $batchChunks = [];
@@ -243,11 +241,13 @@ class ProcessDocumentCorrection implements ShouldQueue
 
             // Assemble final result and cache
             // indicate assembly step
-            try {
-                $this->document->update(['details' => 'Menggabungkan hasil koreksi...']);
-            } catch (\Throwable $e) {
-                Log::warning("Could not update assembling details for Document ID {$this->document->id}: " . $e->getMessage());
+            $document = Document::find($this->documentId);
+            if (! $document) {
+                Log::warning("Document ID {$this->documentId} not found before assembling; aborting.");
+                return implode("\n\n", $correctedChunks);
             }
+
+            $this->pushProgress($document, 'Menggabungkan hasil koreksi...');
 
             $result = implode("\n\n", $correctedChunks);
             Cache::put($cacheKey, $result, now()->addDays(7));
@@ -312,5 +312,30 @@ class ProcessDocumentCorrection implements ShouldQueue
             public function body() { return 'no-response'; }
             public function json() { return []; }
         };
+    }
+
+    /**
+     * Append a progress entry to the document's progress_log and update `details`.
+     * This is best-effort and will not throw if the document is gone.
+     */
+    private function pushProgress(Document $document, string $message, string $status = null)
+    {
+        try {
+            $log = $document->progress_log ?? [];
+            if (!is_array($log)) $log = [];
+            $entry = ['ts' => now()->toDateTimeString(), 'message' => $message];
+            $log[] = $entry;
+            // keep last 50 entries only
+            if (count($log) > 50) $log = array_slice($log, -50);
+
+            $update = ['progress_log' => $log, 'details' => $message];
+            if (!is_null($status)) {
+                $update['upload_status'] = $status;
+            }
+
+            $document->update($update);
+        } catch (\Throwable $e) {
+            Log::warning("pushProgress failed for Document ID {$document->id}: " . $e->getMessage());
+        }
     }
 }

@@ -57,7 +57,16 @@ class DocumentController extends Controller
         try {
             \Log::info("🔵 Polling received for Document ID {$id}"); 
 
-            $document = Document::findOrFail($id);
+            $document = Document::find($id);
+            if (! $document) {
+                return response()->json([
+                    'status' => 'Deleted',
+                    'done' => true,
+                    'details' => 'Dokumen telah dihapus oleh pengguna.',
+                    'progress' => [],
+                    'redirect_url' => null
+                ]);
+            }
 
             if ($document->user_id !== Auth::id()) {
                 return response()->json(['status' => 'Unauthorized'], 403);
@@ -73,6 +82,7 @@ class DocumentController extends Controller
                 'status' => $document->upload_status,
                 'done' => $isCompleted,
                 'details' => $document->details,
+                'progress' => array_slice($document->progress_log ?? [], -20),
                 'redirect_url' => route('correction.show', $document->id)
             ]);
         } catch (\Throwable $e) {

@@ -23,6 +23,17 @@
                 Status: {{ $document->upload_status }}...
             </p>
             <p id="status-details" class="text-sm sm:text-base text-gray-500 mt-2">{{ $document->details ?? '' }}</p>
+            <div id="progress-panel" class="w-full mt-4 text-left">
+                <h4 class="text-sm font-semibold text-[#556080] mb-2">Progres</h4>
+                <ul id="progress-list" class="text-sm text-gray-600 space-y-1 max-h-40 overflow-auto pr-2">
+                    @foreach(array_slice($document->progress_log ?? [], -10) as $entry)
+                        <li class="flex gap-2 items-start">
+                            <span class="text-xs text-gray-400">[{{ $entry['ts'] ?? '' }}]</span>
+                            <span>{{ $entry['message'] ?? '' }}</span>
+                        </li>
+                    @endforeach
+                </ul>
+            </div>
         </div>
         
         <div id="error-message" class="mt-4 text-red-600 font-bold hidden"></div>
@@ -87,10 +98,42 @@
                             errorEl.classList.remove('hidden');
                         }
                     }
+                    else if (data.status === 'Deleted') {
+                        if (pollingIntervalId !== null) { clearInterval(pollingIntervalId); }
+                        mainTitle.innerText = "Dokumen Dihapus 🗑️";
+                        statusDisplay.innerHTML = `
+                            <a href="{{ route('history') }}"
+                               class="inline-block px-6 sm:px-8 py-2.5 sm:py-3 bg-[#4a4a6a] text-white rounded-lg font-bold text-lg sm:text-xl hover:bg-[#6a7a9a] transition duration-200 shadow-lg w-full sm:w-auto">
+                                Kembali ke Riwayat
+                            </a>
+                        `;
+                        statusMessage.innerText = data.details || 'Dokumen telah dihapus.';
+                        docInfo.classList.add('hidden');
+                    }
                     // always update details if present
                     const detailsEl = document.getElementById('status-details');
                     if (data.details && detailsEl) {
                         detailsEl.innerText = data.details;
+                    }
+
+                    // update progress list if provided
+                    if (data.progress && Array.isArray(data.progress)) {
+                        const list = document.getElementById('progress-list');
+                        if (list) {
+                            list.innerHTML = '';
+                            data.progress.forEach(entry => {
+                                const li = document.createElement('li');
+                                li.className = 'flex gap-2 items-start';
+                                const ts = document.createElement('span');
+                                ts.className = 'text-xs text-gray-400';
+                                ts.innerText = '[' + (entry.ts || '') + ']';
+                                const msg = document.createElement('span');
+                                msg.innerText = entry.message || '';
+                                li.appendChild(ts);
+                                li.appendChild(msg);
+                                list.appendChild(li);
+                            });
+                        }
                     }
                 })
                 .catch(error => {

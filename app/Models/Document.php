@@ -15,6 +15,11 @@ class Document extends Model {
         'original_text',
         'corrected_text',
         'details',
+        'progress_log',
+    ];
+
+    protected $casts = [
+        'progress_log' => 'array',
     ];
 
     public function user() {
