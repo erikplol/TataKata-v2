@@ -12,6 +12,9 @@ class Document extends Model {
         'file_name',
         'file_location',
         'upload_status',
+        'original_text',
+        'corrected_text',
+        'details',
     ];
 
     public function user() {

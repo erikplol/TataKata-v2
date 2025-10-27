@@ -31,6 +31,13 @@ class ProcessDocumentCorrection implements ShouldQueue
     public function handle()
     {
         $document = $this->document;
+        // mark started (helps the UI know processing began and provides initial details)
+        try {
+            $document->update(['upload_status' => 'Processing', 'details' => 'Memulai pemrosesan dokumen...']);
+        } catch (\Throwable $e) {
+            // best-effort: log and continue; model fillable has been updated to include details
+            Log::warning("Could not write initial processing status for Document ID {$document->id}: " . $e->getMessage());
+        }
         $file_path = storage_path("app/public/{$document->file_location}");
         
         if (!file_exists($file_path)) {
@@ -40,6 +47,12 @@ class ProcessDocumentCorrection implements ShouldQueue
 
         try {
             $parser = new Parser();
+            // update progress for parsing
+            try {
+                $document->update(['details' => 'Memulai parsing PDF...']);
+            } catch (\Throwable $e) {
+                Log::warning("Could not update parsing details for Document ID {$document->id}: " . $e->getMessage());
+            }
             $pdf = $parser->parseFile($file_path);
             $original_text = trim($pdf->getText());
 
@@ -51,12 +64,20 @@ class ProcessDocumentCorrection implements ShouldQueue
             $clean_text = mb_convert_encoding($original_text, 'UTF-8', 'UTF-8');
             $clean_text = preg_replace('/[[:cntrl:]]/', '', $clean_text);
             $original_text = $clean_text;
+            // indicate we're preparing chunks / checking cache
+            try {
+                $document->update(['details' => 'Memecah dokumen menjadi potongan dan memeriksa cache...']);
+            } catch (\Throwable $e) {
+                Log::warning("Could not update chunking details for Document ID {$document->id}: " . $e->getMessage());
+            }
+
             $corrected_text = $this->correctTextWithGemini($original_text);
 
             if (str_starts_with($corrected_text, 'ERROR:')) {
                 throw new \Exception($corrected_text);
             }
 
+            // persist results and mark completed
             $document->original_text = $original_text;
             $document->corrected_text = $corrected_text;
             $document->upload_status = 'Completed';
@@ -120,6 +141,13 @@ class ProcessDocumentCorrection implements ShouldQueue
 
             Log::info("Chunk cache hits: {$cacheHits}/{$chunkCount}");
 
+            // update document with chunking/cache summary so UI can show progress
+            try {
+                $this->document->update(['details' => "Memproses dokumen: panjang={$textLen} chars, potongan={$chunkCount}, cache_hits={$cacheHits}"]);
+            } catch (\Throwable $e) {
+                Log::warning("Could not update chunk/cache details for Document ID {$this->document->id}: " . $e->getMessage());
+            }
+
             if (empty($toSend)) {
                 $result = implode("\n\n", $correctedChunks);
                 Cache::put($cacheKey, $result, now()->addDays(7));
@@ -138,6 +166,13 @@ class ProcessDocumentCorrection implements ShouldQueue
                 $batchNumber++;
                 $batchStart = microtime(true);
                 Log::info("Sending batch {$batchNumber}/{$totalBatches} (size=" . count($batch) . ") to Gemini...");
+
+                // update progress so UI can display current batch being processed
+                try {
+                    $this->document->update(['details' => "Mengirim batch {$batchNumber}/{$totalBatches} ke Gemini (size=" . count($batch) . ")"]);
+                } catch (\Throwable $e) {
+                    Log::warning("Could not update batch details for Document ID {$this->document->id}: " . $e->getMessage());
+                }
 
                 // Prepare payload descriptors so we can match responses to indices
                 $batchChunks = [];
@@ -207,6 +242,13 @@ class ProcessDocumentCorrection implements ShouldQueue
             }
 
             // Assemble final result and cache
+            // indicate assembly step
+            try {
+                $this->document->update(['details' => 'Menggabungkan hasil koreksi...']);
+            } catch (\Throwable $e) {
+                Log::warning("Could not update assembling details for Document ID {$this->document->id}: " . $e->getMessage());
+            }
+
             $result = implode("\n\n", $correctedChunks);
             Cache::put($cacheKey, $result, now()->addDays(7));
 

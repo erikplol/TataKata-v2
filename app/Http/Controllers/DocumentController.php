@@ -72,6 +72,7 @@ class DocumentController extends Controller
             return response()->json([
                 'status' => $document->upload_status,
                 'done' => $isCompleted,
+                'details' => $document->details,
                 'redirect_url' => route('correction.show', $document->id)
             ]);
         } catch (\Throwable $e) {

@@ -22,6 +22,7 @@
             <p id="status-message" class="text-base sm:text-lg font-semibold text-[#556080]">
                 Status: {{ $document->upload_status }}...
             </p>
+            <p id="status-details" class="text-sm sm:text-base text-gray-500 mt-2">{{ $document->details ?? '' }}</p>
         </div>
         
         <div id="error-message" class="mt-4 text-red-600 font-bold hidden"></div>
@@ -79,6 +80,17 @@
                             </a>
                         `;
                         statusMessage.innerText = "Terjadi kesalahan. Silakan coba unggah dokumen lagi.";
+                        // show any details from the server (error info)
+                        const errorEl = document.getElementById('error-message');
+                        if (data.details) {
+                            errorEl.innerText = data.details;
+                            errorEl.classList.remove('hidden');
+                        }
+                    }
+                    // always update details if present
+                    const detailsEl = document.getElementById('status-details');
+                    if (data.details && detailsEl) {
+                        detailsEl.innerText = data.details;
                     }
                 })
                 .catch(error => {
