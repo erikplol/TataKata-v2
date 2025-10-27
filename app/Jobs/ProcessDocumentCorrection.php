@@ -164,6 +164,67 @@ class ProcessDocumentCorrection implements ShouldQueue
 
                     $file_path = $tempFile; // use the downloaded file
                     Log::info("Fallback download successful for Document ID {$document->id}, using temp file: {$tempFile}", ['document_id' => $document->id]);
+
+                    // If the temp file has no .pdf extension but its MIME type is PDF,
+                    // rename it to include .pdf so downstream tools that rely on
+                    // extensions (or for easier debugging) see a proper filename.
+                    try {
+                        if (function_exists('finfo_open')) {
+                            $finfo = finfo_open(FILEINFO_MIME_TYPE);
+                            $mime = @finfo_file($finfo, $file_path);
+                            finfo_close($finfo);
+                        } else {
+                            $mime = null;
+                        }
+
+                        $ext = pathinfo($file_path, PATHINFO_EXTENSION);
+                        if (strtolower($mime) === 'application/pdf' && strtolower($ext) !== 'pdf') {
+                            $pdfPath = $file_path . '.pdf';
+                            if (@rename($file_path, $pdfPath)) {
+                                $file_path = $pdfPath;
+                                $tempFile = $pdfPath; // ensure cleanup removes the renamed file
+                                Log::info('Renamed temp download to have .pdf extension', ['document_id' => $document->id, 'new_path' => $pdfPath]);
+                            } else {
+                                Log::warning('Failed to rename temp file to .pdf extension', ['document_id' => $document->id, 'path' => $file_path]);
+                            }
+                        }
+                    } catch (\Throwable $e) {
+                        Log::warning('Could not examine/rename downloaded temp file: ' . $e->getMessage(), ['document_id' => $document->id]);
+                    }
+
+                    // Persist the downloaded file to object storage (prefer 's3') so
+                    // the web process and users can access it via MinIO/S3 while the
+                    // worker parses the local temp copy.
+                    try {
+                        $targetDisk = null;
+                        if (array_key_exists('s3', (array) config('filesystems.disks', []))) {
+                            $targetDisk = 's3';
+                        }
+                        if (empty($targetDisk)) {
+                            $targetDisk = $document->disk ?: config('filesystems.default');
+                        }
+                        if (empty($targetDisk)) {
+                            $targetDisk = 'public';
+                        }
+
+                        try {
+                            $stream = fopen($file_path, 'r');
+                            if ($stream !== false) {
+                                Storage::disk($targetDisk)->put($fileLocation, $stream);
+                                if (is_resource($stream)) fclose($stream);
+                                Log::info('Persisted fallback-downloaded file to disk', ['document_id' => $document->id, 'disk' => $targetDisk, 'file_location' => $fileLocation]);
+
+                                if ($document->disk !== $targetDisk) {
+                                    $document->disk = $targetDisk;
+                                    $document->save();
+                                }
+                            }
+                        } catch (\Throwable $e) {
+                            Log::warning('Failed to persist fallback-downloaded file: ' . $e->getMessage(), ['document_id' => $document->id]);
+                        }
+                    } catch (\Throwable $_) {
+                        // ignore persistence failures but continue parsing
+                    }
                 } catch (\Throwable $e) {
                     Log::warning('Fallback download via signed URL failed: ' . $e->getMessage(), ['document_id' => $document->id, 'exception' => $e->getTraceAsString()]);
                     if (!empty($tempFile) && file_exists($tempFile)) @unlink($tempFile);
