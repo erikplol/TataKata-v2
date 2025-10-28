@@ -219,7 +219,7 @@ class ProcessDocumentCorrection implements ShouldQueue
 
             $parser = new Parser();
             // update progress for parsing
-            $this->pushProgress($document, 'Memulai parsing PDF...');
+            $this->pushProgress($document, 'Membaca isi dokumen...');
             $pdf = $parser->parseFile($file_path);
             $original_text = trim($pdf->getText());
 
@@ -228,11 +228,34 @@ class ProcessDocumentCorrection implements ShouldQueue
                 return;
             }
 
+            // Log PDF extraction stats for verification
+            $pageCount = count($pdf->getPages());
+            $originalLength = mb_strlen($original_text, 'UTF-8');
+            Log::info('PDF extraction complete', [
+                'document_id' => $document->id,
+                'page_count' => $pageCount,
+                'original_text_length' => $originalLength,
+                'first_100_chars' => mb_substr($original_text, 0, 100, 'UTF-8'),
+                'last_100_chars' => mb_substr($original_text, -100, 100, 'UTF-8')
+            ]);
+
             $clean_text = mb_convert_encoding($original_text, 'UTF-8', 'UTF-8');
             $clean_text = preg_replace('/[[:cntrl:]]/', '', $clean_text);
             $original_text = $clean_text;
+            
+            // Verify no text was lost during cleaning
+            $cleanedLength = mb_strlen($original_text, 'UTF-8');
+            if ($cleanedLength < $originalLength * 0.9) {
+                Log::warning('Significant text loss during cleaning', [
+                    'document_id' => $document->id,
+                    'original_length' => $originalLength,
+                    'cleaned_length' => $cleanedLength,
+                    'loss_percentage' => round((1 - $cleanedLength / $originalLength) * 100, 2)
+                ]);
+            }
+            
             // indicate we're preparing chunks / checking cache
-            $this->pushProgress($document, 'Memecah dokumen menjadi potongan dan memeriksa cache...');
+            $this->pushProgress($document, 'Mempersiapkan dokumen untuk dikoreksi...');
 
             $corrected_text = $this->correctTextWithGemini($original_text);
 
@@ -290,11 +313,25 @@ class ProcessDocumentCorrection implements ShouldQueue
             $textLen = mb_strlen($text, 'UTF-8');
             $chunks = [];
             for ($offset = 0; $offset < $textLen; $offset += $maxLength) {
-                $chunks[] = mb_substr($text, $offset, $maxLength, 'UTF-8');
+                $chunkText = mb_substr($text, $offset, $maxLength, 'UTF-8');
+                $chunks[] = $chunkText;
             }
 
             $chunkCount = count($chunks);
-            Log::info("Processing document correction: length={$textLen} chars, chunks={$chunkCount}");
+            
+            // Verify all text is captured in chunks
+            $totalChunkLength = 0;
+            foreach ($chunks as $chunk) {
+                $totalChunkLength += mb_strlen($chunk, 'UTF-8');
+            }
+            
+            Log::info("Processing document correction: length={$textLen} chars, chunks={$chunkCount}", [
+                'document_id' => $this->documentId,
+                'text_length' => $textLen,
+                'chunk_count' => $chunkCount,
+                'total_chunk_length' => $totalChunkLength,
+                'coverage_percentage' => $textLen > 0 ? round(($totalChunkLength / $textLen) * 100, 2) : 0
+            ]);
 
             // Prepare containers
             $correctedChunks = array_fill(0, $chunkCount, null);
@@ -321,7 +358,7 @@ class ProcessDocumentCorrection implements ShouldQueue
                 return implode("\n\n", $correctedChunks);
             }
 
-            $this->pushProgress($document, "Memproses dokumen: panjang={$textLen} chars, potongan={$chunkCount}, cache_hits={$cacheHits}");
+            $this->pushProgress($document, "Memeriksa dokumen ({$chunkCount} bagian)...");
 
             if (empty($toSend)) {
                 $result = implode("\n\n", $correctedChunks);
@@ -349,7 +386,7 @@ class ProcessDocumentCorrection implements ShouldQueue
                     return implode("\n\n", $correctedChunks);
                 }
 
-                $this->pushProgress($document, "Mengirim batch {$batchNumber}/{$totalBatches} ke Gemini (size=" . count($batch) . ")");
+                $this->pushProgress($document, "Mengoreksi bagian {$batchNumber} dari {$totalBatches}...");
 
                 // Prepare payload descriptors so we can match responses to indices
                 $batchChunks = [];
@@ -422,10 +459,17 @@ class ProcessDocumentCorrection implements ShouldQueue
                         try {
                             $json = $response->json();
                             if (is_array($json)) {
-                                // Common Gemini-like shapes: try candidates -> output or top-level output
-                                if (!empty($json['candidates'][0]['output'])) {
+                                // Gemini API response structure (updated for 2.5-flash):
+                                // Try: candidates[0].content.parts[0].text (current API format)
+                                if (!empty($json['candidates'][0]['content']['parts'][0]['text'])) {
+                                    $extracted = $json['candidates'][0]['content']['parts'][0]['text'];
+                                }
+                                // Fallback: candidates[0].output (older format)
+                                elseif (!empty($json['candidates'][0]['output'])) {
                                     $extracted = $json['candidates'][0]['output'];
-                                } elseif (!empty($json['output'])) {
+                                }
+                                // Fallback: top-level output
+                                elseif (!empty($json['output'])) {
                                     $extracted = is_string($json['output']) ? $json['output'] : json_encode($json['output']);
                                 }
                             }
@@ -460,6 +504,24 @@ class ProcessDocumentCorrection implements ShouldQueue
             $this->pushProgress($document, 'Menggabungkan hasil koreksi...');
 
             $result = implode("\n\n", $correctedChunks);
+            
+            // Verify all chunks were processed
+            $nullChunks = 0;
+            $failedChunks = 0;
+            foreach ($correctedChunks as $idx => $chunk) {
+                if ($chunk === null) $nullChunks++;
+                if (is_string($chunk) && strpos($chunk, '[GAGAL KOREKSI BAGIAN') === 0) $failedChunks++;
+            }
+            
+            Log::info("Document correction assembly complete", [
+                'document_id' => $this->documentId,
+                'total_chunks' => $chunkCount,
+                'null_chunks' => $nullChunks,
+                'failed_chunks' => $failedChunks,
+                'result_length' => mb_strlen($result, 'UTF-8'),
+                'original_length' => $textLen
+            ]);
+            
             Cache::put($cacheKey, $result, now()->addDays(7));
 
             $totalTook = round(microtime(true) - $jobStart, 3);
