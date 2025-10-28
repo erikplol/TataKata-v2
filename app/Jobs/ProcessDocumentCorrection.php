@@ -312,9 +312,6 @@ class ProcessDocumentCorrection implements ShouldQueue
                                     $document->disk = $targetDisk;
                                     $document->save();
                                 }
-                            } else {
-                                Log::warning('Could not open file for persistence', ['document_id' => $document->id, 'path' => $file_path]);
-                            }
                         } catch (\Throwable $e) {
                             Log::warning('Failed to persist fallback-downloaded file: ' . $e->getMessage(), ['document_id' => $document->id]);
                         }
