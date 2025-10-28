@@ -196,13 +196,11 @@ class ProcessDocumentCorrection implements ShouldQueue
                     // the web process and users can access it via MinIO/S3 while the
                     // worker parses the local temp copy.
                     try {
-                        $targetDisk = null;
-                        if (array_key_exists('s3', (array) config('filesystems.disks', []))) {
-                            $targetDisk = 's3';
-                        }
-                        if (empty($targetDisk)) {
-                            $targetDisk = $document->disk ?: config('filesystems.default');
-                        }
+                        // Persist the downloaded file to local/public storage only.
+                        // We intentionally avoid S3/object storage in this branch per
+                        // configuration: prefer the Document.recorded disk or the
+                        // application default and fall back to 'public'.
+                        $targetDisk = $document->disk ?: config('filesystems.default');
                         if (empty($targetDisk)) {
                             $targetDisk = 'public';
                         }
@@ -389,20 +387,9 @@ class ProcessDocumentCorrection implements ShouldQueue
                                 Log::warning('PDF header missing; failed to save local debug sample: ' . $e->getMessage(), ['document_id' => $document->id]);
                             }
 
-                            // If an 's3' disk is configured, also attempt to persist the
-                            // sample there so it can be inspected via MinIO/R2/Spaces.
-                            try {
-                                if (array_key_exists('s3', (array) config('filesystems.disks', []))) {
-                                    try {
-                                        Storage::disk('s3')->put($sampleName, $sample);
-                                        Log::warning('Also saved debug sample to s3', ['document_id' => $document->id, 'sample' => $sampleName]);
-                                    } catch (\Throwable $e) {
-                                        Log::warning('Failed to save debug sample to s3: ' . $e->getMessage(), ['document_id' => $document->id]);
-                                    }
-                                }
-                            } catch (\Throwable $_) {
-                                // ignore errors while checking config
-                            }
+                            // S3/object-storage persistence intentionally removed —
+                            // we only persist debug samples locally to avoid remote
+                            // dependencies in this deployment.
                         }
                     } catch (\Throwable $_) {
                         // ignore sample saving failures
@@ -599,73 +586,45 @@ class ProcessDocumentCorrection implements ShouldQueue
                         $status = method_exists($response, 'status') ? $response->status() : 'unknown';
                         Log::error("Gemini HTTP Error (Chunk {$index}): status={$status} body=" . $response->body());
                         $correctedChunks[$index] = "[GAGAL KOREKSI BAGIAN {$index}]";
-                                // Verify sizes match when possible to detect corruption
-                                try {
-                                    $remoteSize = null;
-                                    if (!is_null($localSize)) {
-                                        try {
-                                            $remoteSize = Storage::disk($targetDisk)->size($fileLocation);
-                                        } catch (\Throwable $_) {
-                                            $remoteSize = null;
-                                        }
-                                    }
+                        continue;
+                    }
 
-                                    if (!is_null($localSize) && !is_null($remoteSize) && $localSize !== $remoteSize) {
-                                        Log::warning('Size mismatch after persistence; local vs remote', ['document_id' => $document->id, 'local' => $localSize, 'remote' => $remoteSize]);
-
-                                        // Attempt robust retry using AWS SDK directly if available
-                                        if (class_exists('\\Aws\\S3\\S3Client')) {
-                                            try {
-                                                Log::info('Attempting S3Client putObject retry', ['document_id' => $document->id]);
-                                                $s3cfg = config('filesystems.disks.s3');
-                                                $s3Options = [
-                                                    'version' => 'latest',
-                                                    'region' => $s3cfg['region'] ?? env('AWS_DEFAULT_REGION', 'us-east-1'),
-                                                    'credentials' => [
-                                                        'key' => $s3cfg['key'] ?? env('AWS_ACCESS_KEY_ID'),
-                                                        'secret' => $s3cfg['secret'] ?? env('AWS_SECRET_ACCESS_KEY'),
-                                                    ],
-                                                ];
-                                                if (!empty($s3cfg['endpoint'])) {
-                                                    $s3Options['endpoint'] = $s3cfg['endpoint'];
-                                                    $s3Options['use_path_style_endpoint'] = !empty($s3cfg['use_path_style_endpoint']);
-                                                }
-                                                $client = new \Aws\S3\S3Client($s3Options);
-                                                $bucket = $s3cfg['bucket'] ?? env('AWS_BUCKET');
-                                                $bodyStream = fopen($file_path, 'rb');
-                                                if ($bodyStream !== false) {
-                                                    $putParams = [
-                                                        'Bucket' => $bucket,
-                                                        'Key' => $fileLocation,
-                                                        'Body' => $bodyStream,
-                                                    ];
-                                                    if (!empty($mime)) $putParams['ContentType'] = $mime;
-                                                    if (!empty($localSize)) $putParams['ContentLength'] = $localSize;
-                                                    $client->putObject($putParams);
-                                                    if (is_resource($bodyStream)) fclose($bodyStream);
-                                                    Log::info('S3Client putObject retry completed', ['document_id' => $document->id]);
-                                                }
-                                            } catch (\Throwable $e) {
-                                                Log::warning('S3Client putObject retry failed: ' . $e->getMessage(), ['document_id' => $document->id]);
-                                            }
-                                        }
-
-                                        // If SDK wasn't available or retry didn't fix it, try memory fallback
-                                        try {
-                                            $contents = @file_get_contents($file_path);
-                                            if ($contents !== false) {
-                                                Storage::disk($targetDisk)->put($fileLocation, $contents, $putOptions);
-                                                Log::info('Fallback memory upload attempted after mismatch', ['document_id' => $document->id]);
-                                            } else {
-                                                Log::warning('Fallback memory upload failed: could not read local file', ['document_id' => $document->id]);
-                                            }
-                                        } catch (\Throwable $e) {
-                                            Log::warning('Fallback memory upload threw: ' . $e->getMessage(), ['document_id' => $document->id]);
-                                        }
-                                    }
-                                } catch (\Throwable $_) {
-                                    // ignore size check failures
+                    // Successful response: try to extract corrected text
+                    try {
+                        $body = method_exists($response, 'body') ? $response->body() : (string) $response;
+                        $extracted = null;
+                        try {
+                            $json = $response->json();
+                            if (is_array($json)) {
+                                // Common Gemini-like shapes: try candidates -> output or top-level output
+                                if (!empty($json['candidates'][0]['output'])) {
+                                    $extracted = $json['candidates'][0]['output'];
+                                } elseif (!empty($json['output'])) {
+                                    $extracted = is_string($json['output']) ? $json['output'] : json_encode($json['output']);
                                 }
+                            }
+                        } catch (\Throwable $_) {
+                            // ignore JSON parsing errors
+                        }
+
+                        if (empty($extracted)) $extracted = trim($body);
+                        $correctedChunks[$index] = trim($extracted);
+
+                        // cache this chunk for future runs
+                        try {
+                            $chunkKey = 'doc_chunk_' . sha1($b['text']);
+                            Cache::put($chunkKey, $correctedChunks[$index], now()->addDays(7));
+                        } catch (\Throwable $_) {
+                            // ignore cache failures
+                        }
+                    } catch (\Throwable $t) {
+                        Log::warning("Failed to parse Gemini response for chunk {$index}: " . $t->getMessage());
+                        $correctedChunks[$index] = "[GAGAL KOREKSI BAGIAN {$index}]";
+                    }
+                }
+            }
+
+            // All batches processed; assemble and return
             $document = Document::find($this->documentId);
             if (! $document) {
                 Log::warning("Document ID {$this->documentId} not found before assembling; aborting.");
