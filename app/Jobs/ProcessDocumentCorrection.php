@@ -34,28 +34,17 @@ class ProcessDocumentCorrection implements ShouldQueue
 
     public function handle()
     {
-        // Always operate on the live DB record (in case it was deleted while queued)
         $document = Document::find($this->documentId);
         if (! $document) {
             Log::warning("Document ID {$this->documentId} no longer exists; aborting job.");
             return;
         }
 
-        // mark started (helps the UI know processing began and provides initial details)
+
         $this->pushProgress($document, 'Memulai pemrosesan dokumen...', 'Processing');
 
-        // Resolve file location using the configured filesystem disk. In deployments like Railway
-        // the app and worker don't share local disk, so we must support remote disks (s3) by
-        // streaming the file to a temporary local path for processing.
         $fileLocation = $document->file_location;
 
-        // Determine which disk actually contains the file. We try these in order:
-        // 1. If the document record stores a disk (future-proof), try that.
-        // 2. Iterate configured disks and pick the first one where the file exists.
-        // 3. Fall back to the default disk.
-        // For this deployment the worker should always fetch the original file from
-        // the web server via a temporary signed URL rather than probing local
-        // filesystem disks. This avoids cross-container filesystem assumptions.
         $disk = config('filesystems.default') ?: 'public';
         Log::info("Worker will fetch original via signed URL for Document ID {$document->id}");
 
@@ -74,7 +63,14 @@ class ProcessDocumentCorrection implements ShouldQueue
                 'expires_at' => now()->addMinutes(10)->timestamp
             ]);
             
-            $response = HttpFacade::withOptions(['timeout' => 60, 'sink' => $tempFile])->get($signedUrl);
+            // Attach a worker token header
+            $workerToken = env('WORKER_TOKEN');
+            $httpClient = HttpFacade::withOptions(['timeout' => 60, 'sink' => $tempFile]);
+            if (!empty($workerToken)) {
+                $httpClient = $httpClient->withHeaders(['X-Worker-Token' => $workerToken]);
+            }
+
+            $response = $httpClient->get($signedUrl);
 
             $status = method_exists($response, 'status') ? $response->status() : null;
             $contentType = $response->header('Content-Type');
@@ -111,7 +107,7 @@ class ProcessDocumentCorrection implements ShouldQueue
             $file_path = $tempFile; // use the downloaded file
             Log::info("Fallback download successful for Document ID {$document->id}, using temp file: {$tempFile}", ['document_id' => $document->id]);
 
-            // If the temp file has a MIME type of PDF but no .pdf extension, rename it
+            // If the temp file has a MIME type of PDF but no .pdf extension, rename
             try {
                 if (function_exists('finfo_open')) {
                     $finfo = finfo_open(FILEINFO_MIME_TYPE);
@@ -126,7 +122,7 @@ class ProcessDocumentCorrection implements ShouldQueue
                     $pdfPath = $file_path . '.pdf';
                     if (@rename($file_path, $pdfPath)) {
                         $file_path = $pdfPath;
-                        $tempFile = $pdfPath; // ensure cleanup removes the renamed file
+                        $tempFile = $pdfPath;
                         Log::info('Renamed temp download to have .pdf extension', ['document_id' => $document->id, 'new_path' => $pdfPath]);
                     } else {
                         Log::warning('Failed to rename temp file to .pdf extension', ['document_id' => $document->id, 'path' => $file_path]);
@@ -162,11 +158,7 @@ class ProcessDocumentCorrection implements ShouldQueue
                 'is_readable' => $debugReadable,
             ]);
 
-            // Quick validation: ensure the resolved file *looks* like a PDF by
-            // checking the leading bytes for the "%PDF-" signature. This helps
-            // detect cases where an HTML error page or truncated response was
-            // saved to disk (common with signed-URL 502/502 pages) which would
-            // otherwise cause the PDF parser to fail without an easy artifact.
+            // PDF Validation
             try {
                 $isPdf = false;
                 if (!empty($file_path) && is_file($file_path) && is_readable($file_path)) {
@@ -181,8 +173,6 @@ class ProcessDocumentCorrection implements ShouldQueue
                 }
 
                 if (! $isPdf) {
-                    // Save a small debug sample (first 1KB) to local storage for
-                    // debugging. Do not fail noisily if the save itself errors.
                     try {
                         $sample = @file_get_contents($file_path, false, null, 0, 1024);
                         if ($sample !== false && !empty($sample)) {
@@ -194,10 +184,6 @@ class ProcessDocumentCorrection implements ShouldQueue
                             } catch (\Throwable $e) {
                                 Log::warning('PDF header missing; failed to save local debug sample: ' . $e->getMessage(), ['document_id' => $document->id]);
                             }
-
-                            // S3/object-storage persistence intentionally removed —
-                            // we only persist debug samples locally to avoid remote
-                            // dependencies in this deployment.
                         }
                     } catch (\Throwable $_) {
                         // ignore sample saving failures
@@ -305,11 +291,9 @@ class ProcessDocumentCorrection implements ShouldQueue
             $modelName = 'gemini-2.5-flash';
             $url = "https://generativelanguage.googleapis.com/v1beta/models/{$modelName}:generateContent?key=" . $apiKey;
 
-            // request timeout (seconds) - increased to handle long Gemini processing times
-            // Each chunk can be large and Gemini may take time to process Indonesian text
             $timeoutDuration = 600; // 10 minutes per request
 
-            // Chunk size (characters) - tuneable
+            // Chunk size (characters)
             $maxLength = 8000;
             $textLen = mb_strlen($text, 'UTF-8');
             $chunks = [];
@@ -538,9 +522,7 @@ class ProcessDocumentCorrection implements ShouldQueue
                                 'json_keys' => is_array($json) ? array_keys($json) : []
                             ]);
                             
-                            if (is_array($json)) {
-                                // Gemini API response structure (updated for 2.5-flash):
-                                // Try: candidates[0].content.parts[0].text (current API format)
+                            if (is_array($json)) {                             
                                 if (!empty($json['candidates'][0]['content']['parts'][0]['text'])) {
                                     $extracted = $json['candidates'][0]['content']['parts'][0]['text'];
                                     Log::info("Extracted via candidates[0].content.parts[0].text for chunk {$index}");

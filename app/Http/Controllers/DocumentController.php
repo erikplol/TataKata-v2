@@ -183,15 +183,21 @@ class DocumentController extends Controller
         $document = Document::findOrFail($id);
 
         // Allow access if the request carries a valid signed URL OR the
-        // authenticated user owns the document. This enables the worker
-        // to fetch the original file via a temporary signed URL when the
-        // worker cannot access the web container's local filesystem.
+        // authenticated user owns the document OR the request includes a
+        // worker token header. The worker token is an additional layer used
+        // when the worker fetches the signed URL; it helps mitigate risks if
+        // a signed URL is leaked (the header must also be present).
         $hasValidSignature = request()->hasValidSignature();
+        $workerHeader = request()->header('X-Worker-Token');
+        $expectedWorkerToken = env('WORKER_TOKEN');
+        $hasValidWorkerToken = !empty($expectedWorkerToken) && is_string($workerHeader) && hash_equals((string) $expectedWorkerToken, (string) $workerHeader);
         $isOwner = Auth::check() && $document->user_id === Auth::id();
-        
+
         \Log::info('viewOriginal access attempt', [
             'document_id' => $document->id,
             'has_valid_signature' => $hasValidSignature,
+            'has_worker_header' => request()->hasHeader('X-Worker-Token'),
+            'has_valid_worker_token' => $hasValidWorkerToken,
             'is_authenticated' => Auth::check(),
             'is_owner' => $isOwner,
             'request_url' => request()->fullUrl(),
@@ -201,10 +207,10 @@ class DocumentController extends Controller
             'expires_value' => request()->get('expires'),
             'current_time' => time()
         ]);
-        
-        if (! $hasValidSignature) {
+
+        if (! $hasValidSignature && ! $hasValidWorkerToken) {
             if (! $isOwner) {
-                \Log::warning('viewOriginal access denied - no valid signature and not owner', [
+                \Log::warning('viewOriginal access denied - no valid signature, no worker token, and not owner', [
                     'document_id' => $document->id,
                     'url' => request()->fullUrl()
                 ]);
