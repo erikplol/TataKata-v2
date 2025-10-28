@@ -192,9 +192,41 @@ class ProcessDocumentCorrection implements ShouldQueue
                         Log::warning('Could not examine/rename downloaded temp file: ' . $e->getMessage(), ['document_id' => $document->id]);
                     }
 
-                    // Persist the downloaded file to object storage (prefer 's3') so
-                    // the web process and users can access it via MinIO/S3 while the
-                    // worker parses the local temp copy.
+                    // Before persisting the downloaded file, validate it looks like a PDF.
+                    // If the download contains HTML (error page) or is truncated we
+                    // should NOT copy it into the public/local disk — keep a local
+                    // debug sample and fail the job so the original upload isn't
+                    // overwritten by invalid content.
+                    try {
+                        try {
+                            $h = @fopen($file_path, 'rb');
+                            $first = $h !== false ? @fread($h, 5) : null;
+                            if (is_resource($h)) @fclose($h);
+                        } catch (\Throwable $_) {
+                            $first = null;
+                        }
+
+                        if (! ($first === '%PDF-' || (is_string($first) && strpos($first, '%PDF') === 0)) ) {
+                            // Save a small debug sample locally for investigation
+                            try {
+                                $sample = @file_get_contents($file_path, false, null, 0, 2048);
+                                if ($sample !== false && $sample !== '') {
+                                    $sampleName = 'debug_samples/document_' . $document->id . '_' . time() . '.sample.txt';
+                                    try { Storage::disk('local')->put($sampleName, $sample); } catch (\Throwable $_) { }
+                                    Log::warning('Fallback download produced non-PDF content; saved debug sample and aborting persistence', ['document_id' => $document->id, 'sample' => $sampleName]);
+                                }
+                            } catch (\Throwable $_) { }
+
+                            if (!empty($tempFile) && file_exists($tempFile)) @unlink($tempFile);
+                            $document->update(['upload_status' => 'Failed', 'details' => 'Invalid PDF data: Missing %PDF header.']);
+                            return;
+                        }
+                    } catch (\Throwable $e) {
+                        // If header check unexpectedly fails, log and continue to attempt persistence
+                        Log::warning('Pre-persist PDF header check failed: ' . $e->getMessage(), ['document_id' => $document->id]);
+                    }
+
+                    // Persist the downloaded file to object storage (local/public only)
                     try {
                         // Persist the downloaded file to local/public storage only.
                         // We intentionally avoid S3/object storage in this branch per
