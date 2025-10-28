@@ -397,6 +397,12 @@ class ProcessDocumentCorrection implements ShouldQueue
                 // Attempt the batch via Http::pool. Wrap to catch unexpected exceptions
                 $responses = [];
                 try {
+                    Log::info("About to call Http::pool for batch {$batchNumber}", [
+                        'document_id' => $this->documentId,
+                        'batch_size' => count($batchChunks),
+                        'timeout' => $timeoutDuration
+                    ]);
+                    
                     $poolResponses = Http::withOptions(['timeout' => $timeoutDuration])->pool(function (Pool $pool) use ($url, $batchChunks) {
                         $calls = [];
                         foreach ($batchChunks as $b) {
@@ -414,9 +420,19 @@ class ProcessDocumentCorrection implements ShouldQueue
                         return $calls;
                     });
                     
+                    Log::info("Http::pool returned", [
+                        'document_id' => $this->documentId,
+                        'batch' => $batchNumber,
+                        'response_count' => count($poolResponses)
+                    ]);
+                    
                     // Convert pool responses - pool can return exceptions instead of responses
-                    foreach ($poolResponses as $poolResp) {
+                    foreach ($poolResponses as $idx => $poolResp) {
                         if ($poolResp instanceof \Throwable) {
+                            Log::error("Pool response {$idx} is exception", [
+                                'class' => get_class($poolResp),
+                                'message' => $poolResp->getMessage()
+                            ]);
                             // Pool returned an exception - create a synthetic failed response
                             $responses[] = new class {
                                 public function successful() { return false; }
@@ -425,6 +441,11 @@ class ProcessDocumentCorrection implements ShouldQueue
                                 public function json() { return []; }
                             };
                         } else {
+                            $status = method_exists($poolResp, 'status') ? $poolResp->status() : 'unknown';
+                            Log::info("Pool response {$idx} is valid", [
+                                'status' => $status,
+                                'successful' => method_exists($poolResp, 'successful') ? $poolResp->successful() : 'unknown'
+                            ]);
                             $responses[] = $poolResp;
                         }
                     }
@@ -437,7 +458,10 @@ class ProcessDocumentCorrection implements ShouldQueue
                     ]);
                     
                 } catch (\Throwable $t) {
-                    Log::error("Http::pool failed on batch {$batchNumber}: " . $t->getMessage());
+                    Log::error("Http::pool failed on batch {$batchNumber}: " . $t->getMessage(), [
+                        'exception_class' => get_class($t),
+                        'trace' => $t->getTraceAsString()
+                    ]);
                     // Fallback: process sequentially with retries
                     $responses = [];
                     foreach ($batchChunks as $b) {
@@ -458,9 +482,21 @@ class ProcessDocumentCorrection implements ShouldQueue
                 }
 
                 // Handle responses in order
+                Log::info("Processing {$count} responses for batch {$batchNumber}", [
+                    'document_id' => $this->documentId,
+                    'response_count' => count($responses)
+                ]);
+                
                 foreach (array_values($responses) as $k => $response) {
                     $b = $batchChunks[$k];
                     $index = $b['index'];
+                    
+                    Log::info("Processing response for chunk {$index}", [
+                        'document_id' => $this->documentId,
+                        'batch_index' => $k,
+                        'chunk_index' => $index,
+                        'response_type' => is_object($response) ? get_class($response) : gettype($response)
+                    ]);
                     
                     // Check if response is an exception/error instead of a proper response
                     if ($response instanceof \Throwable) {
@@ -483,7 +519,7 @@ class ProcessDocumentCorrection implements ShouldQueue
 
                     if (! $response->successful()) {
                         $status = method_exists($response, 'status') ? $response->status() : 'unknown';
-                        Log::error("Gemini HTTP Error (Chunk {$index}): status={$status} body=" . $response->body());
+                        Log::error("Gemini HTTP Error (Chunk {$index}): status={$status} body=" . substr($response->body(), 0, 500));
                         $correctedChunks[$index] = "[GAGAL KOREKSI BAGIAN {$index}]";
                         continue;
                     }
@@ -494,27 +530,48 @@ class ProcessDocumentCorrection implements ShouldQueue
                         $extracted = null;
                         try {
                             $json = $response->json();
+                            Log::info("Gemini response JSON for chunk {$index}", [
+                                'document_id' => $this->documentId,
+                                'has_candidates' => isset($json['candidates']),
+                                'candidate_count' => isset($json['candidates']) ? count($json['candidates']) : 0,
+                                'json_keys' => is_array($json) ? array_keys($json) : []
+                            ]);
+                            
                             if (is_array($json)) {
                                 // Gemini API response structure (updated for 2.5-flash):
                                 // Try: candidates[0].content.parts[0].text (current API format)
                                 if (!empty($json['candidates'][0]['content']['parts'][0]['text'])) {
                                     $extracted = $json['candidates'][0]['content']['parts'][0]['text'];
+                                    Log::info("Extracted via candidates[0].content.parts[0].text for chunk {$index}");
                                 }
                                 // Fallback: candidates[0].output (older format)
                                 elseif (!empty($json['candidates'][0]['output'])) {
                                     $extracted = $json['candidates'][0]['output'];
+                                    Log::info("Extracted via candidates[0].output for chunk {$index}");
                                 }
                                 // Fallback: top-level output
                                 elseif (!empty($json['output'])) {
                                     $extracted = is_string($json['output']) ? $json['output'] : json_encode($json['output']);
+                                    Log::info("Extracted via top-level output for chunk {$index}");
                                 }
                             }
-                        } catch (\Throwable $_) {
-                            // ignore JSON parsing errors
+                        } catch (\Throwable $jsonErr) {
+                            Log::error("JSON parsing failed for chunk {$index}: " . $jsonErr->getMessage());
                         }
 
-                        if (empty($extracted)) $extracted = trim($body);
+                        if (empty($extracted)) {
+                            Log::warning("No text extracted from JSON, using raw body for chunk {$index}", [
+                                'body_length' => strlen($body),
+                                'body_preview' => substr($body, 0, 200)
+                            ]);
+                            $extracted = trim($body);
+                        }
+                        
                         $correctedChunks[$index] = trim($extracted);
+                        Log::info("Successfully processed chunk {$index}", [
+                            'document_id' => $this->documentId,
+                            'extracted_length' => mb_strlen($correctedChunks[$index], 'UTF-8')
+                        ]);
 
                         // cache this chunk for future runs
                         try {
