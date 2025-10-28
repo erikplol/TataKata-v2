@@ -395,8 +395,9 @@ class ProcessDocumentCorrection implements ShouldQueue
                 }
 
                 // Attempt the batch via Http::pool. Wrap to catch unexpected exceptions
+                $responses = [];
                 try {
-                    $responses = Http::withOptions(['timeout' => $timeoutDuration])->pool(function (Pool $pool) use ($url, $batchChunks) {
+                    $poolResponses = Http::withOptions(['timeout' => $timeoutDuration])->pool(function (Pool $pool) use ($url, $batchChunks) {
                         $calls = [];
                         foreach ($batchChunks as $b) {
                             $payload = [
@@ -412,6 +413,29 @@ class ProcessDocumentCorrection implements ShouldQueue
                         }
                         return $calls;
                     });
+                    
+                    // Convert pool responses - pool can return exceptions instead of responses
+                    foreach ($poolResponses as $poolResp) {
+                        if ($poolResp instanceof \Throwable) {
+                            // Pool returned an exception - create a synthetic failed response
+                            $responses[] = new class {
+                                public function successful() { return false; }
+                                public function status() { return 0; }
+                                public function body() { return 'pool request threw exception'; }
+                                public function json() { return []; }
+                            };
+                        } else {
+                            $responses[] = $poolResp;
+                        }
+                    }
+                    
+                    Log::info("Http::pool processed responses", [
+                        'document_id' => $this->documentId,
+                        'batch' => $batchNumber,
+                        'total' => count($responses),
+                        'successful' => count(array_filter($responses, fn($r) => method_exists($r, 'successful') && $r->successful()))
+                    ]);
+                    
                 } catch (\Throwable $t) {
                     Log::error("Http::pool failed on batch {$batchNumber}: " . $t->getMessage());
                     // Fallback: process sequentially with retries
@@ -438,9 +462,21 @@ class ProcessDocumentCorrection implements ShouldQueue
                     $b = $batchChunks[$k];
                     $index = $b['index'];
                     
-                    // Check if response is actually a Response object or an exception
+                    // Check if response is an exception/error instead of a proper response
+                    if ($response instanceof \Throwable) {
+                        Log::error("Chunk {$index} got exception from pool", [
+                            'exception_class' => get_class($response),
+                            'message' => $response->getMessage()
+                        ]);
+                        $correctedChunks[$index] = "[GAGAL KOREKSI BAGIAN {$index}]";
+                        continue;
+                    }
+                    
+                    // Check if response is actually a Response object
                     if (! is_object($response) || ! method_exists($response, 'successful')) {
-                        Log::error("Invalid response object for chunk {$index}");
+                        Log::error("Invalid response object for chunk {$index}", [
+                            'type' => is_object($response) ? get_class($response) : gettype($response)
+                        ]);
                         $correctedChunks[$index] = "[GAGAL KOREKSI BAGIAN {$index}]";
                         continue;
                     }
