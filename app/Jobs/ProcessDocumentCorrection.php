@@ -68,7 +68,10 @@ class ProcessDocumentCorrection implements ShouldQueue
             
             Log::info('Worker fetching file via signed URL', [
                 'document_id' => $document->id,
-                'signed_url' => $signedUrl
+                'signed_url' => $signedUrl,
+                'app_url' => config('app.url'),
+                'route_name' => 'correction.original',
+                'expires_at' => now()->addMinutes(10)->timestamp
             ]);
             
             $response = HttpFacade::withOptions(['timeout' => 60, 'sink' => $tempFile])->get($signedUrl);

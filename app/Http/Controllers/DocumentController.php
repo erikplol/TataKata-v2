@@ -193,11 +193,21 @@ class DocumentController extends Controller
             'document_id' => $document->id,
             'has_valid_signature' => $hasValidSignature,
             'is_authenticated' => Auth::check(),
-            'is_owner' => $isOwner
+            'is_owner' => $isOwner,
+            'request_url' => request()->fullUrl(),
+            'has_signature_param' => request()->has('signature'),
+            'has_expires_param' => request()->has('expires'),
+            'signature_value' => request()->get('signature'),
+            'expires_value' => request()->get('expires'),
+            'current_time' => time()
         ]);
         
         if (! $hasValidSignature) {
             if (! $isOwner) {
+                \Log::warning('viewOriginal access denied - no valid signature and not owner', [
+                    'document_id' => $document->id,
+                    'url' => request()->fullUrl()
+                ]);
                 abort(403, 'Anda tidak memiliki akses ke file ini.');
             }
         }
