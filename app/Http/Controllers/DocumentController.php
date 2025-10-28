@@ -236,10 +236,15 @@ class DocumentController extends Controller
                 }
             }
 
-            // If the disk supports temporaryUrl (S3/compatible), redirect to it
             if (method_exists($disk, 'temporaryUrl')) {
-                $url = $disk->temporaryUrl($path, now()->addMinutes(15));
-                return redirect()->away($url);
+                try {
+                    $url = $disk->temporaryUrl($path, now()->addMinutes(15));
+                    return redirect()->away($url);
+                } catch (\BadMethodCallException $e) {
+                    \Log::info('Disk does not support temporaryUrl; falling back to stream', ['document_id' => $document->id, 'disk' => $diskName, 'message' => $e->getMessage()]);
+                } catch (\Exception $e) {
+                    \Log::warning('temporaryUrl failed for Document ID ' . $document->id . ': ' . $e->getMessage(), ['document_id' => $document->id]);
+                }
             }
 
             // Fallback: stream the file through the app
