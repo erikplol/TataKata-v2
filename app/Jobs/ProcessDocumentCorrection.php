@@ -219,12 +219,32 @@ class ProcessDocumentCorrection implements ShouldQueue
                                     rewind($stream);
                                 }
 
-                                Storage::disk($targetDisk)->put($fileLocation, $stream);
+                                // Detect MIME type and pass it to the storage adapter so
+                                // object storage saves an accurate Content-Type header.
+                                $mime = null;
+                                try {
+                                    if (function_exists('finfo_open')) {
+                                        $finfo = finfo_open(FILEINFO_MIME_TYPE);
+                                        $mime = @finfo_file($finfo, $file_path) ?: null;
+                                        finfo_close($finfo);
+                                    }
+                                } catch (\Throwable $_) {
+                                    $mime = null;
+                                }
+
+                                $putOptions = [];
+                                if (!empty($mime)) {
+                                    $putOptions['ContentType'] = $mime;
+                                }
+                                // prefer public visibility so files are easier to inspect
+                                $putOptions['visibility'] = $putOptions['visibility'] ?? 'public';
+
+                                Storage::disk($targetDisk)->put($fileLocation, $stream, $putOptions);
 
                                 // close stream after upload
                                 if (is_resource($stream)) fclose($stream);
 
-                                Log::info('Persisted fallback-downloaded file to disk (stream)', ['document_id' => $document->id, 'disk' => $targetDisk, 'file_location' => $fileLocation]);
+                                Log::info('Persisted fallback-downloaded file to disk (stream)', ['document_id' => $document->id, 'disk' => $targetDisk, 'file_location' => $fileLocation, 'content_type' => $mime]);
 
                                 // Verify sizes match when possible to detect corruption
                                 try {
@@ -241,8 +261,11 @@ class ProcessDocumentCorrection implements ShouldQueue
                                         try {
                                             $contents = @file_get_contents($file_path);
                                             if ($contents !== false) {
-                                                Storage::disk($targetDisk)->put($fileLocation, $contents);
-                                                Log::info('Fallback memory upload succeeded', ['document_id' => $document->id, 'disk' => $targetDisk, 'file_location' => $fileLocation]);
+                                                $memOptions = [];
+                                                if (!empty($mime)) $memOptions['ContentType'] = $mime;
+                                                $memOptions['visibility'] = $memOptions['visibility'] ?? 'public';
+                                                Storage::disk($targetDisk)->put($fileLocation, $contents, $memOptions);
+                                                Log::info('Fallback memory upload succeeded', ['document_id' => $document->id, 'disk' => $targetDisk, 'file_location' => $fileLocation, 'content_type' => $mime]);
                                             } else {
                                                 Log::warning('Fallback memory upload failed: could not read local file', ['document_id' => $document->id]);
                                             }
