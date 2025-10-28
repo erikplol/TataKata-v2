@@ -208,43 +208,76 @@ class ProcessDocumentCorrection implements ShouldQueue
                         }
 
                         try {
-                            // Open in binary mode and ensure the stream pointer is at
-                            // the start. Some drivers expect a fresh stream or a
-                            // rewound stream; failing to rewind can result in
-                            // truncated/corrupt uploads.
-                            $stream = @fopen($file_path, 'rb');
-                            if ($stream !== false) {
-                                // Ensure pointer is at start
-                                if (is_resource($stream) && ftell($stream) !== 0) {
-                                    rewind($stream);
-                                }
+                            // Before streaming into the adapter, prefer doing a direct
+                            // copy when the target disk is a local driver. This avoids
+                            // stream-related truncation issues and writes the file to
+                            // the correct storage path (e.g., storage/app/public/...).
+                            $cfg = config('filesystems.disks.' . $targetDisk, []);
+                            $isLocalDriver = isset($cfg['driver']) && $cfg['driver'] === 'local';
 
-                                // Detect MIME type and pass it to the storage adapter so
-                                // object storage saves an accurate Content-Type header.
-                                $mime = null;
+                            if ($isLocalDriver) {
                                 try {
-                                    if (function_exists('finfo_open')) {
-                                        $finfo = finfo_open(FILEINFO_MIME_TYPE);
-                                        $mime = @finfo_file($finfo, $file_path) ?: null;
-                                        finfo_close($finfo);
+                                    $dir = pathinfo($fileLocation, PATHINFO_DIRNAME);
+                                    if ($dir === '.' || $dir === '') $dir = '';
+                                    $basename = pathinfo($fileLocation, PATHINFO_BASENAME);
+                                    // Use Illuminate\Http\File to ensure the filesystem
+                                    // copy uses the real file and not a stream.
+                                    $fileObj = new \Illuminate\Http\File($file_path);
+                                    Storage::disk($targetDisk)->putFileAs($dir, $fileObj, $basename);
+                                    Log::info('Copied temp file into local disk via putFileAs', ['document_id' => $document->id, 'disk' => $targetDisk, 'file_location' => $fileLocation]);
+                                } catch (\Throwable $e) {
+                                    Log::warning('Local disk copy failed; will fall back to streamed upload: ' . $e->getMessage(), ['document_id' => $document->id]);
+                                    $isLocalDriver = false; // allow fallback to stream path
+                                }
+                            }
+
+                            if (! $isLocalDriver) {
+                                // Open in binary mode and ensure the stream pointer is at
+                                // the start. Some drivers expect a fresh stream or a
+                                // rewound stream; failing to rewind can result in
+                                // truncated/corrupt uploads.
+                                $stream = @fopen($file_path, 'rb');
+                                if ($stream !== false) {
+                                    // Ensure pointer is at start
+                                    if (is_resource($stream) && ftell($stream) !== 0) {
+                                        rewind($stream);
                                     }
-                                } catch (\Throwable $_) {
+
+                                    // Determine local size before attempting upload so we
+                                    // can detect truncation after the put.
+                                    $localSize = is_file($file_path) ? filesize($file_path) : null;
+                                    Log::info('Preparing to persist file', ['document_id' => $document->id, 'local_size' => $localSize]);
+
+                                    // Detect MIME type and pass it to the storage adapter so
+                                    // object storage saves an accurate Content-Type header.
                                     $mime = null;
+                                    try {
+                                        if (function_exists('finfo_open')) {
+                                            $finfo = finfo_open(FILEINFO_MIME_TYPE);
+                                            $mime = @finfo_file($finfo, $file_path) ?: null;
+                                            finfo_close($finfo);
+                                        }
+                                    } catch (\Throwable $_) {
+                                        $mime = null;
+                                    }
+
+                                    $putOptions = [];
+                                    if (!empty($mime)) {
+                                        $putOptions['ContentType'] = $mime;
+                                    }
+                                    // prefer public visibility so files are easier to inspect
+                                    $putOptions['visibility'] = $putOptions['visibility'] ?? 'public';
+
+                                    $putResult = Storage::disk($targetDisk)->put($fileLocation, $stream, $putOptions);
+
+                                    // close stream after upload
+                                    if (is_resource($stream)) fclose($stream);
+
+                                    Log::info('Persisted fallback-downloaded file to disk (stream)', ['document_id' => $document->id, 'disk' => $targetDisk, 'file_location' => $fileLocation, 'content_type' => $mime, 'put_result' => $putResult]);
+                                } else {
+                                    Log::warning('Could not open file for persistence', ['document_id' => $document->id, 'path' => $file_path]);
                                 }
-
-                                $putOptions = [];
-                                if (!empty($mime)) {
-                                    $putOptions['ContentType'] = $mime;
-                                }
-                                // prefer public visibility so files are easier to inspect
-                                $putOptions['visibility'] = $putOptions['visibility'] ?? 'public';
-
-                                Storage::disk($targetDisk)->put($fileLocation, $stream, $putOptions);
-
-                                // close stream after upload
-                                if (is_resource($stream)) fclose($stream);
-
-                                Log::info('Persisted fallback-downloaded file to disk (stream)', ['document_id' => $document->id, 'disk' => $targetDisk, 'file_location' => $fileLocation, 'content_type' => $mime]);
+                            }
 
                                 // Verify sizes match when possible to detect corruption
                                 try {
@@ -566,32 +599,73 @@ class ProcessDocumentCorrection implements ShouldQueue
                         $status = method_exists($response, 'status') ? $response->status() : 'unknown';
                         Log::error("Gemini HTTP Error (Chunk {$index}): status={$status} body=" . $response->body());
                         $correctedChunks[$index] = "[GAGAL KOREKSI BAGIAN {$index}]";
-                        continue;
-                    }
+                                // Verify sizes match when possible to detect corruption
+                                try {
+                                    $remoteSize = null;
+                                    if (!is_null($localSize)) {
+                                        try {
+                                            $remoteSize = Storage::disk($targetDisk)->size($fileLocation);
+                                        } catch (\Throwable $_) {
+                                            $remoteSize = null;
+                                        }
+                                    }
 
-                    $data = $response->json();
-                    if (isset($data['candidates'][0]['content']['parts'][0]['text'])) {
-                        $correctedText = trim($data['candidates'][0]['content']['parts'][0]['text']);
-                        $correctedChunks[$index] = $correctedText;
-                        $chunkKey = 'doc_chunk_' . sha1($b['text']);
-                        Cache::put($chunkKey, $correctedText, now()->addDays(30));
-                        Log::info("Chunk {$index} corrected and cached (chunkKey={$chunkKey}).");
-                    } else {
-                        $errorMessage = $data['error']['message'] ?? ($data['candidates'][0]['finishReason'] ?? 'Tidak ada teks hasil koreksi dari Gemini.');
-                        Log::error("Gemini API Error (Chunk {$index}): " . $errorMessage);
-                        $correctedChunks[$index] = "[GAGAL KOREKSI BAGIAN {$index}]";
-                    }
-                }
+                                    if (!is_null($localSize) && !is_null($remoteSize) && $localSize !== $remoteSize) {
+                                        Log::warning('Size mismatch after persistence; local vs remote', ['document_id' => $document->id, 'local' => $localSize, 'remote' => $remoteSize]);
 
-                $batchTook = round(microtime(true) - $batchStart, 3);
-                Log::info("Batch {$batchNumber}/{$totalBatches} completed in {$batchTook}s.");
+                                        // Attempt robust retry using AWS SDK directly if available
+                                        if (class_exists('\\Aws\\S3\\S3Client')) {
+                                            try {
+                                                Log::info('Attempting S3Client putObject retry', ['document_id' => $document->id]);
+                                                $s3cfg = config('filesystems.disks.s3');
+                                                $s3Options = [
+                                                    'version' => 'latest',
+                                                    'region' => $s3cfg['region'] ?? env('AWS_DEFAULT_REGION', 'us-east-1'),
+                                                    'credentials' => [
+                                                        'key' => $s3cfg['key'] ?? env('AWS_ACCESS_KEY_ID'),
+                                                        'secret' => $s3cfg['secret'] ?? env('AWS_SECRET_ACCESS_KEY'),
+                                                    ],
+                                                ];
+                                                if (!empty($s3cfg['endpoint'])) {
+                                                    $s3Options['endpoint'] = $s3cfg['endpoint'];
+                                                    $s3Options['use_path_style_endpoint'] = !empty($s3cfg['use_path_style_endpoint']);
+                                                }
+                                                $client = new \Aws\S3\S3Client($s3Options);
+                                                $bucket = $s3cfg['bucket'] ?? env('AWS_BUCKET');
+                                                $bodyStream = fopen($file_path, 'rb');
+                                                if ($bodyStream !== false) {
+                                                    $putParams = [
+                                                        'Bucket' => $bucket,
+                                                        'Key' => $fileLocation,
+                                                        'Body' => $bodyStream,
+                                                    ];
+                                                    if (!empty($mime)) $putParams['ContentType'] = $mime;
+                                                    if (!empty($localSize)) $putParams['ContentLength'] = $localSize;
+                                                    $client->putObject($putParams);
+                                                    if (is_resource($bodyStream)) fclose($bodyStream);
+                                                    Log::info('S3Client putObject retry completed', ['document_id' => $document->id]);
+                                                }
+                                            } catch (\Throwable $e) {
+                                                Log::warning('S3Client putObject retry failed: ' . $e->getMessage(), ['document_id' => $document->id]);
+                                            }
+                                        }
 
-                // small pause between batches if you need to respect rate limits
-                // usleep(150000);
-            }
-
-            // Assemble final result and cache
-            // indicate assembly step
+                                        // If SDK wasn't available or retry didn't fix it, try memory fallback
+                                        try {
+                                            $contents = @file_get_contents($file_path);
+                                            if ($contents !== false) {
+                                                Storage::disk($targetDisk)->put($fileLocation, $contents, $putOptions);
+                                                Log::info('Fallback memory upload attempted after mismatch', ['document_id' => $document->id]);
+                                            } else {
+                                                Log::warning('Fallback memory upload failed: could not read local file', ['document_id' => $document->id]);
+                                            }
+                                        } catch (\Throwable $e) {
+                                            Log::warning('Fallback memory upload threw: ' . $e->getMessage(), ['document_id' => $document->id]);
+                                        }
+                                    }
+                                } catch (\Throwable $_) {
+                                    // ignore size check failures
+                                }
             $document = Document::find($this->documentId);
             if (! $document) {
                 Log::warning("Document ID {$this->documentId} not found before assembling; aborting.");
