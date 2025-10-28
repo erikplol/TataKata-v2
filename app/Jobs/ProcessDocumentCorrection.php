@@ -380,8 +380,19 @@ class ProcessDocumentCorrection implements ShouldQueue
                     // Fallback: process sequentially with retries
                     $responses = [];
                     foreach ($batchChunks as $b) {
-                        $resp = $this->sendChunkWithRetries($url, $b['text'], $timeoutDuration);
-                        $responses[] = $resp;
+                        try {
+                            $resp = $this->sendChunkWithRetries($url, $b['text'], $timeoutDuration);
+                            $responses[] = $resp;
+                        } catch (\Throwable $e) {
+                            Log::error("sendChunkWithRetries threw exception for chunk {$b['index']}: " . $e->getMessage());
+                            // Create a synthetic failed response for this chunk
+                            $responses[] = new class {
+                                public function successful() { return false; }
+                                public function status() { return 0; }
+                                public function body() { return 'exception during retry'; }
+                                public function json() { return []; }
+                            };
+                        }
                     }
                 }
 
@@ -389,6 +400,13 @@ class ProcessDocumentCorrection implements ShouldQueue
                 foreach (array_values($responses) as $k => $response) {
                     $b = $batchChunks[$k];
                     $index = $b['index'];
+                    
+                    // Check if response is actually a Response object or an exception
+                    if (! is_object($response) || ! method_exists($response, 'successful')) {
+                        Log::error("Invalid response object for chunk {$index}");
+                        $correctedChunks[$index] = "[GAGAL KOREKSI BAGIAN {$index}]";
+                        continue;
+                    }
 
                     if (! $response->successful()) {
                         $status = method_exists($response, 'status') ? $response->status() : 'unknown';
