@@ -403,7 +403,7 @@ class ProcessDocumentCorrection implements ShouldQueue
                         'timeout' => $timeoutDuration
                     ]);
                     
-                    $poolResponses = Http::withOptions(['timeout' => $timeoutDuration])->pool(function (Pool $pool) use ($url, $batchChunks) {
+                    $poolResponses = Http::pool(function (Pool $pool) use ($url, $batchChunks, $timeoutDuration) {
                         $calls = [];
                         foreach ($batchChunks as $b) {
                             $payload = [
@@ -415,7 +415,7 @@ class ProcessDocumentCorrection implements ShouldQueue
                                     ]
                                 ]
                             ];
-                            $calls[] = $pool->post($url, $payload);
+                            $calls[] = $pool->withOptions(['timeout' => $timeoutDuration])->post($url, $payload);
                         }
                         return $calls;
                     });
@@ -482,7 +482,7 @@ class ProcessDocumentCorrection implements ShouldQueue
                 }
 
                 // Handle responses in order
-                Log::info("Processing {$count} responses for batch {$batchNumber}", [
+                Log::info("Processing responses for batch {$batchNumber}", [
                     'document_id' => $this->documentId,
                     'response_count' => count($responses)
                 ]);
