@@ -186,8 +186,18 @@ class DocumentController extends Controller
         // authenticated user owns the document. This enables the worker
         // to fetch the original file via a temporary signed URL when the
         // worker cannot access the web container's local filesystem.
-        if (! request()->hasValidSignature()) {
-            if ($document->user_id !== Auth::id()) {
+        $hasValidSignature = request()->hasValidSignature();
+        $isOwner = Auth::check() && $document->user_id === Auth::id();
+        
+        \Log::info('viewOriginal access attempt', [
+            'document_id' => $document->id,
+            'has_valid_signature' => $hasValidSignature,
+            'is_authenticated' => Auth::check(),
+            'is_owner' => $isOwner
+        ]);
+        
+        if (! $hasValidSignature) {
+            if (! $isOwner) {
                 abort(403, 'Anda tidak memiliki akses ke file ini.');
             }
         }
