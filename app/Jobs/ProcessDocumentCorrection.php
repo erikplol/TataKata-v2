@@ -24,7 +24,7 @@ class ProcessDocumentCorrection implements ShouldQueue
     use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
     protected $document;
     protected $documentId;
-    public $timeout = 300;
+    public $timeout = 900; // 15 minutes total job timeout
 
     public function __construct(Document $document)
     {
@@ -305,8 +305,9 @@ class ProcessDocumentCorrection implements ShouldQueue
             $modelName = 'gemini-2.5-flash';
             $url = "https://generativelanguage.googleapis.com/v1beta/models/{$modelName}:generateContent?key=" . $apiKey;
 
-            // request timeout (seconds) - must be less than job timeout
-            $timeoutDuration = 240;
+            // request timeout (seconds) - increased to handle long Gemini processing times
+            // Each chunk can be large and Gemini may take time to process Indonesian text
+            $timeoutDuration = 600; // 10 minutes per request
 
             // Chunk size (characters) - tuneable
             $maxLength = 8000;
