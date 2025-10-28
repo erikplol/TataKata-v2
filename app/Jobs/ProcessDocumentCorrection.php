@@ -53,313 +53,60 @@ class ProcessDocumentCorrection implements ShouldQueue
         // 1. If the document record stores a disk (future-proof), try that.
         // 2. Iterate configured disks and pick the first one where the file exists.
         // 3. Fall back to the default disk.
-        $disk = null;
-        $candidateDisks = [];
+        // For this deployment the worker should always fetch the original file from
+        // the web server via a temporary signed URL rather than probing local
+        // filesystem disks. This avoids cross-container filesystem assumptions.
+        $disk = config('filesystems.default') ?: 'public';
+        Log::info("Worker will fetch original via signed URL for Document ID {$document->id}");
 
-        // Prefer an explicit disk saved on the Document, then prefer 'public' (local
-        // shared storage), and finally the other configured disks. We intentionally
-        // skip any disk literally named 's3' to avoid probing S3 when you don't
-        // want to use object storage in this deployment.
-        if (!empty($document->disk)) {
-            $candidateDisks[] = $document->disk;
-        }
-
-        if (!in_array('public', $candidateDisks, true)) {
-            $candidateDisks[] = 'public';
-        }
-
-        foreach (array_keys(config('filesystems.disks') ?? []) as $cfgDisk) {
-            if ($cfgDisk === 's3') continue; // skip s3 by request
-            if (!in_array($cfgDisk, $candidateDisks, true)) {
-                $candidateDisks[] = $cfgDisk;
-            }
-        }
-
-        foreach ($candidateDisks as $candidate) {
-            try {
-                if (empty($candidate)) continue;
-                if (Storage::disk($candidate)->exists($fileLocation)) {
-                    $disk = $candidate;
-                    break;
-                }
-            } catch (\Throwable $e) {
-                // ignore misconfigured disk adapters and continue
-                Log::warning("Storage disk check failed for candidate '{$candidate}': " . $e->getMessage());
-                continue;
-            }
-        }
-
-        if (empty($disk)) {
-            // fallback to configured default
-            $disk = config('filesystems.default');
-        }
-
-        Log::info("Resolved file disk for Document ID {$document->id}: {$disk}");
-
-        // Helper: get a usable local path to the uploaded file. If the disk exposes a local path
-        // return it; otherwise stream the file to a temp file and return that path. Caller must
-        // unlink the temp file when done if one is created.
+        // Helper: stream the remote file into a temp file so downstream parsing
+        // always operates on a local path. Caller must unlink the temp file when done.
         $tempFile = null;
         try {
-            if (Storage::disk($disk)->exists($fileLocation)) {
-                // If the disk is local (public/local), we can get the real path
-                // Storage::disk(...)->path() works for local drivers.
-                try {
-                    $file_path = Storage::disk($disk)->path($fileLocation);
-                } catch (\Exception $e) {
-                    // Some drivers (s3) don't support path(); fall back to stream copy below
-                    Log::info("Storage::path not available for disk {$disk}, will attempt readStream.", ['document_id' => $document->id, 'exception' => $e->getMessage()]);
-                    $file_path = null;
-                }
+            $tempFile = tempnam(sys_get_temp_dir(), 'doc_');
+            $signedUrl = URL::temporarySignedRoute('correction.original', now()->addMinutes(10), ['document' => $document->id]);
+            $response = HttpFacade::withOptions(['timeout' => 60, 'sink' => $tempFile])->get($signedUrl);
 
-                // If we couldn't get a native path or the path doesn't exist, stream to a temp file
-                if (empty($file_path) || !file_exists($file_path)) {
-                    // stream to temp
-                    $stream = null;
-                    try {
-                        $stream = Storage::disk($disk)->readStream($fileLocation);
-                    } catch (\Throwable $e) {
-                        Log::warning("Storage::readStream threw for disk {$disk} file {$fileLocation}: " . $e->getMessage(), ['document_id' => $document->id]);
-                        $stream = false;
-                    }
+            $status = method_exists($response, 'status') ? $response->status() : null;
+            if (! ($response->successful() || $status === 200)) {
+                $body = method_exists($response, 'body') ? $response->body() : null;
+                Log::warning('Fallback download failed', ['document_id' => $document->id, 'signed_url' => $signedUrl, 'status' => $status, 'body_snippet' => is_string($body) ? substr($body, 0, 500) : null]);
+                @unlink($tempFile);
+                $document->update(['upload_status' => 'Failed', 'details' => 'File tidak ditemukan oleh worker.']);
+                return;
+            }
 
-                    if ($stream === false) {
-                        Log::error("readStream returned false for disk={$disk} file={$fileLocation}", ['document_id' => $document->id]);
-                        $document->update(['upload_status' => 'Failed', 'details' => 'File tidak dapat dibaca oleh worker.']);
-                        return;
-                    }
+            $file_path = $tempFile; // use the downloaded file
+            Log::info("Fallback download successful for Document ID {$document->id}, using temp file: {$tempFile}", ['document_id' => $document->id]);
 
-                    $tempFile = tempnam(sys_get_temp_dir(), 'doc_');
-                    $out = fopen($tempFile, 'w');
-                    $bytes = stream_copy_to_stream($stream, $out);
-                    fclose($out);
-                    if (is_resource($stream)) fclose($stream);
-
-                    Log::info('Streamed remote/local disk file into temp file', ['document_id' => $document->id, 'disk' => $disk, 'file_location' => $fileLocation, 'tempFile' => $tempFile, 'bytes_copied' => $bytes]);
-
-                    $file_path = $tempFile;
+            // If the temp file has a MIME type of PDF but no .pdf extension, rename it
+            try {
+                if (function_exists('finfo_open')) {
+                    $finfo = finfo_open(FILEINFO_MIME_TYPE);
+                    $mime = @finfo_file($finfo, $file_path);
+                    finfo_close($finfo);
                 } else {
-                    Log::info('Resolved native file path for document', ['document_id' => $document->id, 'disk' => $disk, 'file_path' => $file_path]);
+                    $mime = null;
                 }
-            } else {
-                // As a fallback when the worker cannot read local storage (separate
-                // containers), attempt to fetch the original via a temporary signed
-                // URL from the web app. This requires the `correction.original` route
-                // to accept signed requests (handled in the controller).
-                try {
-                    $tempFile = tempnam(sys_get_temp_dir(), 'doc_');
-                    $signedUrl = URL::temporarySignedRoute('correction.original', now()->addMinutes(10), ['document' => $document->id]);
 
-                    // Stream the remote file into the temp file to avoid memory pressure
-                    $response = HttpFacade::withOptions(['timeout' => 60, 'sink' => $tempFile])->get($signedUrl);
-
-                    $status = method_exists($response, 'status') ? $response->status() : null;
-                    if (! ($response->successful() || $status === 200)) {
-                        $body = method_exists($response, 'body') ? $response->body() : null;
-                        Log::warning('Fallback download failed', ['document_id' => $document->id, 'signed_url' => $signedUrl, 'status' => $status, 'body_snippet' => is_string($body) ? substr($body, 0, 500) : null]);
-                        @unlink($tempFile);
-                        $document->update(['upload_status' => 'Failed', 'details' => 'File tidak ditemukan oleh worker.']);
-                        return;
+                $ext = pathinfo($file_path, PATHINFO_EXTENSION);
+                if (strtolower($mime) === 'application/pdf' && strtolower($ext) !== 'pdf') {
+                    $pdfPath = $file_path . '.pdf';
+                    if (@rename($file_path, $pdfPath)) {
+                        $file_path = $pdfPath;
+                        $tempFile = $pdfPath; // ensure cleanup removes the renamed file
+                        Log::info('Renamed temp download to have .pdf extension', ['document_id' => $document->id, 'new_path' => $pdfPath]);
+                    } else {
+                        Log::warning('Failed to rename temp file to .pdf extension', ['document_id' => $document->id, 'path' => $file_path]);
                     }
-
-                    $file_path = $tempFile; // use the downloaded file
-                    Log::info("Fallback download successful for Document ID {$document->id}, using temp file: {$tempFile}", ['document_id' => $document->id]);
-
-                    // If the temp file has no .pdf extension but its MIME type is PDF,
-                    // rename it to include .pdf so downstream tools that rely on
-                    // extensions (or for easier debugging) see a proper filename.
-                    try {
-                        if (function_exists('finfo_open')) {
-                            $finfo = finfo_open(FILEINFO_MIME_TYPE);
-                            $mime = @finfo_file($finfo, $file_path);
-                            finfo_close($finfo);
-                        } else {
-                            $mime = null;
-                        }
-
-                        $ext = pathinfo($file_path, PATHINFO_EXTENSION);
-                        if (strtolower($mime) === 'application/pdf' && strtolower($ext) !== 'pdf') {
-                            $pdfPath = $file_path . '.pdf';
-                            if (@rename($file_path, $pdfPath)) {
-                                $file_path = $pdfPath;
-                                $tempFile = $pdfPath; // ensure cleanup removes the renamed file
-                                Log::info('Renamed temp download to have .pdf extension', ['document_id' => $document->id, 'new_path' => $pdfPath]);
-                            } else {
-                                Log::warning('Failed to rename temp file to .pdf extension', ['document_id' => $document->id, 'path' => $file_path]);
-                            }
-                        }
-                    } catch (\Throwable $e) {
-                        Log::warning('Could not examine/rename downloaded temp file: ' . $e->getMessage(), ['document_id' => $document->id]);
-                    }
-
-                    // Before persisting the downloaded file, validate it looks like a PDF.
-                    // If the download contains HTML (error page) or is truncated we
-                    // should NOT copy it into the public/local disk — keep a local
-                    // debug sample and fail the job so the original upload isn't
-                    // overwritten by invalid content.
-                    try {
-                        try {
-                            $h = @fopen($file_path, 'rb');
-                            $first = $h !== false ? @fread($h, 5) : null;
-                            if (is_resource($h)) @fclose($h);
-                        } catch (\Throwable $_) {
-                            $first = null;
-                        }
-
-                        if (! ($first === '%PDF-' || (is_string($first) && strpos($first, '%PDF') === 0)) ) {
-                            // Save a small debug sample locally for investigation
-                            try {
-                                $sample = @file_get_contents($file_path, false, null, 0, 2048);
-                                if ($sample !== false && $sample !== '') {
-                                    $sampleName = 'debug_samples/document_' . $document->id . '_' . time() . '.sample.txt';
-                                    try { Storage::disk('local')->put($sampleName, $sample); } catch (\Throwable $_) { }
-                                    Log::warning('Fallback download produced non-PDF content; saved debug sample and aborting persistence', ['document_id' => $document->id, 'sample' => $sampleName]);
-                                }
-                            } catch (\Throwable $_) { }
-
-                            if (!empty($tempFile) && file_exists($tempFile)) @unlink($tempFile);
-                            $document->update(['upload_status' => 'Failed', 'details' => 'Invalid PDF data: Missing %PDF header.']);
-                            return;
-                        }
-                    } catch (\Throwable $e) {
-                        // If header check unexpectedly fails, log and continue to attempt persistence
-                        Log::warning('Pre-persist PDF header check failed: ' . $e->getMessage(), ['document_id' => $document->id]);
-                    }
-
-                    // Persist the downloaded file to object storage (local/public only)
-                    try {
-                        // Persist the downloaded file to local/public storage only.
-                        // We intentionally avoid S3/object storage in this branch per
-                        // configuration: prefer the Document.recorded disk or the
-                        // application default and fall back to 'public'.
-                        $targetDisk = $document->disk ?: config('filesystems.default');
-                        if (empty($targetDisk)) {
-                            $targetDisk = 'public';
-                        }
-
-                        try {
-                            // Before streaming into the adapter, prefer doing a direct
-                            // copy when the target disk is a local driver. This avoids
-                            // stream-related truncation issues and writes the file to
-                            // the correct storage path (e.g., storage/app/public/...).
-                            $cfg = config('filesystems.disks.' . $targetDisk, []);
-                            $isLocalDriver = isset($cfg['driver']) && $cfg['driver'] === 'local';
-
-                            if ($isLocalDriver) {
-                                try {
-                                    $dir = pathinfo($fileLocation, PATHINFO_DIRNAME);
-                                    if ($dir === '.' || $dir === '') $dir = '';
-                                    $basename = pathinfo($fileLocation, PATHINFO_BASENAME);
-                                    // Use Illuminate\Http\File to ensure the filesystem
-                                    // copy uses the real file and not a stream.
-                                    $fileObj = new \Illuminate\Http\File($file_path);
-                                    Storage::disk($targetDisk)->putFileAs($dir, $fileObj, $basename);
-                                    Log::info('Copied temp file into local disk via putFileAs', ['document_id' => $document->id, 'disk' => $targetDisk, 'file_location' => $fileLocation]);
-                                } catch (\Throwable $e) {
-                                    Log::warning('Local disk copy failed; will fall back to streamed upload: ' . $e->getMessage(), ['document_id' => $document->id]);
-                                    $isLocalDriver = false; // allow fallback to stream path
-                                }
-                            }
-
-                            if (! $isLocalDriver) {
-                                // Open in binary mode and ensure the stream pointer is at
-                                // the start. Some drivers expect a fresh stream or a
-                                // rewound stream; failing to rewind can result in
-                                // truncated/corrupt uploads.
-                                $stream = @fopen($file_path, 'rb');
-                                if ($stream !== false) {
-                                    // Ensure pointer is at start
-                                    if (is_resource($stream) && ftell($stream) !== 0) {
-                                        rewind($stream);
-                                    }
-
-                                    // Determine local size before attempting upload so we
-                                    // can detect truncation after the put.
-                                    $localSize = is_file($file_path) ? filesize($file_path) : null;
-                                    Log::info('Preparing to persist file', ['document_id' => $document->id, 'local_size' => $localSize]);
-
-                                    // Detect MIME type and pass it to the storage adapter so
-                                    // object storage saves an accurate Content-Type header.
-                                    $mime = null;
-                                    try {
-                                        if (function_exists('finfo_open')) {
-                                            $finfo = finfo_open(FILEINFO_MIME_TYPE);
-                                            $mime = @finfo_file($finfo, $file_path) ?: null;
-                                            finfo_close($finfo);
-                                        }
-                                    } catch (\Throwable $_) {
-                                        $mime = null;
-                                    }
-
-                                    $putOptions = [];
-                                    if (!empty($mime)) {
-                                        $putOptions['ContentType'] = $mime;
-                                    }
-                                    // prefer public visibility so files are easier to inspect
-                                    $putOptions['visibility'] = $putOptions['visibility'] ?? 'public';
-
-                                    $putResult = Storage::disk($targetDisk)->put($fileLocation, $stream, $putOptions);
-
-                                    // close stream after upload
-                                    if (is_resource($stream)) fclose($stream);
-
-                                    Log::info('Persisted fallback-downloaded file to disk (stream)', ['document_id' => $document->id, 'disk' => $targetDisk, 'file_location' => $fileLocation, 'content_type' => $mime, 'put_result' => $putResult]);
-                                } else {
-                                    Log::warning('Could not open file for persistence', ['document_id' => $document->id, 'path' => $file_path]);
-                                }
-                            }
-
-                                // Verify sizes match when possible to detect corruption
-                                try {
-                                    $localSize = is_file($file_path) ? filesize($file_path) : null;
-                                    $remoteSize = null;
-                                    if (!is_null($localSize)) {
-                                        $remoteSize = Storage::disk($targetDisk)->size($fileLocation);
-                                    }
-
-                                    if (!is_null($localSize) && !is_null($remoteSize) && $localSize !== $remoteSize) {
-                                        Log::warning('Size mismatch after persistence; attempting memory fallback upload', ['document_id' => $document->id, 'local' => $localSize, 'remote' => $remoteSize]);
-
-                                        // Fallback: read into memory and retry (safe for typical PDF sizes; adjust if you expect very large files)
-                                        try {
-                                            $contents = @file_get_contents($file_path);
-                                            if ($contents !== false) {
-                                                $memOptions = [];
-                                                if (!empty($mime)) $memOptions['ContentType'] = $mime;
-                                                $memOptions['visibility'] = $memOptions['visibility'] ?? 'public';
-                                                Storage::disk($targetDisk)->put($fileLocation, $contents, $memOptions);
-                                                Log::info('Fallback memory upload succeeded', ['document_id' => $document->id, 'disk' => $targetDisk, 'file_location' => $fileLocation, 'content_type' => $mime]);
-                                            } else {
-                                                Log::warning('Fallback memory upload failed: could not read local file', ['document_id' => $document->id]);
-                                            }
-                                        } catch (\Throwable $e) {
-                                            Log::warning('Fallback memory upload threw: ' . $e->getMessage(), ['document_id' => $document->id]);
-                                        }
-                                    }
-                                } catch (\Throwable $_) {
-                                    // ignore size check failures
-                                }
-
-                                if ($document->disk !== $targetDisk) {
-                                    $document->disk = $targetDisk;
-                                    $document->save();
-                                }
-                        } catch (\Throwable $e) {
-                            Log::warning('Failed to persist fallback-downloaded file: ' . $e->getMessage(), ['document_id' => $document->id]);
-                        }
-                    } catch (\Throwable $_) {
-                        // ignore persistence failures but continue parsing
-                    }
-                } catch (\Throwable $e) {
-                    Log::warning('Fallback download via signed URL failed: ' . $e->getMessage(), ['document_id' => $document->id, 'exception' => $e->getTraceAsString()]);
-                    if (!empty($tempFile) && file_exists($tempFile)) @unlink($tempFile);
-                    $document->update(['upload_status' => 'Failed', 'details' => 'File tidak ditemukan oleh worker.']);
-                    return;
                 }
+            } catch (\Throwable $e) {
+                Log::warning('Could not examine/rename downloaded temp file: ' . $e->getMessage(), ['document_id' => $document->id]);
             }
         } catch (\Throwable $e) {
-            Log::error("Error resolving file for Document ID {$document->id}: " . $e->getMessage(), ['trace' => $e->getTraceAsString()]);
-            $document->update(['upload_status' => 'Failed', 'details' => 'File tidak dapat diakses oleh worker.']);
+            Log::warning('Fallback download via signed URL failed: ' . $e->getMessage(), ['document_id' => $document->id, 'exception' => $e->getTraceAsString()]);
+            if (!empty($tempFile) && file_exists($tempFile)) @unlink($tempFile);
+            $document->update(['upload_status' => 'Failed', 'details' => 'File tidak ditemukan oleh worker.']);
             return;
         }
 
