@@ -65,14 +65,43 @@ class ProcessDocumentCorrection implements ShouldQueue
         try {
             $tempFile = tempnam(sys_get_temp_dir(), 'doc_');
             $signedUrl = URL::temporarySignedRoute('correction.original', now()->addMinutes(10), ['document' => $document->id]);
+            
+            Log::info('Worker fetching file via signed URL', [
+                'document_id' => $document->id,
+                'signed_url' => $signedUrl
+            ]);
+            
             $response = HttpFacade::withOptions(['timeout' => 60, 'sink' => $tempFile])->get($signedUrl);
 
             $status = method_exists($response, 'status') ? $response->status() : null;
+            $contentType = $response->header('Content-Type');
+            $contentLength = $response->header('Content-Length');
+            
+            Log::info('Fallback download response', [
+                'document_id' => $document->id,
+                'status' => $status,
+                'content_type' => $contentType,
+                'content_length' => $contentLength,
+                'temp_file_size' => file_exists($tempFile) ? filesize($tempFile) : 0
+            ]);
+
             if (! ($response->successful() || $status === 200)) {
                 $body = method_exists($response, 'body') ? $response->body() : null;
-                Log::warning('Fallback download failed', ['document_id' => $document->id, 'signed_url' => $signedUrl, 'status' => $status, 'body_snippet' => is_string($body) ? substr($body, 0, 500) : null]);
+                Log::warning('Fallback download failed - non-200 status', ['document_id' => $document->id, 'status' => $status, 'body_snippet' => is_string($body) ? substr($body, 0, 500) : null]);
                 @unlink($tempFile);
                 $document->update(['upload_status' => 'Failed', 'details' => 'File tidak ditemukan oleh worker.']);
+                return;
+            }
+
+            // Check if response is actually a PDF by content-type and file header
+            if ($contentType && stripos($contentType, 'application/pdf') === false && stripos($contentType, 'text/html') !== false) {
+                Log::warning('Fallback download returned HTML instead of PDF', [
+                    'document_id' => $document->id,
+                    'content_type' => $contentType,
+                    'first_bytes' => file_exists($tempFile) ? bin2hex(substr(file_get_contents($tempFile, false, null, 0, 16), 0, 16)) : null
+                ]);
+                @unlink($tempFile);
+                $document->update(['upload_status' => 'Failed', 'details' => 'Worker received HTML error page instead of PDF.']);
                 return;
             }
 
